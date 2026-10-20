@@ -1,0 +1,167 @@
+{
+ "version": 1,
+ "aa": {
+  "format": "lammps",
+  "data": "dodecane_final.data",
+  "dump": "aa.lammpstrj",
+  "atom_style": "auto",
+  "split": "auto",
+  "tpr": "",
+  "traj": ""
+ },
+ "species": 0,
+ "species_formula": "C12",
+ "model": {
+  "center": "com",
+  "beads": [
+   {
+    "name": "E1",
+    "type": "E",
+    "atoms": [
+     0,
+     1,
+     2,
+     3
+    ]
+   },
+   {
+    "name": "M",
+    "type": "M",
+    "atoms": [
+     4,
+     5,
+     6,
+     7
+    ]
+   },
+   {
+    "name": "E2",
+    "type": "E",
+    "atoms": [
+     8,
+     9,
+     10,
+     11
+    ]
+   }
+  ],
+  "bonds": [
+   [
+    0,
+    1
+   ],
+   [
+    1,
+    2
+   ]
+  ],
+  "bond_groups": [
+   "E-M",
+   "E-M"
+  ],
+  "angles": [
+   [
+    0,
+    1,
+    2
+   ]
+  ],
+  "angle_groups": [
+   "E-M-E"
+  ]
+ },
+ "frames": {
+  "start": 0,
+  "stop": null,
+  "stride": 1,
+  "max_molecules": 0
+ },
+ "units": {
+  "rc": 7.203,
+  "kT": 1.0
+ },
+ "cg": {
+  "style": "dpd",
+  "box_mode": "match",
+  "replicate": 1,
+  "frame": -1,
+  "n_molecules": 50,
+  "box_length": 10.0,
+  "density": 3.0,
+  "solvent": false,
+  "solvent_name": "W",
+  "neutralize": true,
+  "bead_mass": 1.0,
+  "a_default": 25.0,
+  "a_ij": {},
+  "gamma": 4.5,
+  "A_default": -40.0,
+  "B_default": 25.0,
+  "A_ij": {},
+  "B_ij": {},
+  "rd": 0.75,
+  "slater_lambda": 0.25,
+  "coul_cut": 3.0,
+  "bjerrum": 7.1,
+  "kspace_acc": 0.0001,
+  "special_lj": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "dt": 0.02,
+  "n_start": 1000,
+  "n_equil": 2000,
+  "n_prod": 20000,
+  "dump_every": 100,
+  "seed": 4928459
+ },
+ "angle_style": "harmonic",
+ "scoring": {
+  "mode": "normalized",
+  "bond_scale": 10.0,
+  "weights": {}
+ },
+ "optimizer": {
+  "method": "ibi+pso",
+  "ibi_iterations": 4,
+  "ibi_alpha": 0.7,
+  "cycles": [
+   {
+    "what": "all",
+    "k_factor": 3.0,
+    "r0_frac": 0.2,
+    "theta_deg": 20.0
+   },
+   {
+    "what": "angles",
+    "k_factor": 2.0,
+    "r0_frac": 0.1,
+    "theta_deg": 10.0
+   },
+   {
+    "what": "all",
+    "k_factor": 1.4,
+    "r0_frac": 0.06,
+    "theta_deg": 5.0
+   }
+  ],
+  "swarm_size": 0,
+  "max_steps": 3,
+  "patience": 4,
+  "seed": 12345,
+  "k_min": 0.1,
+  "k_max_bond": 5000.0,
+  "k_max_angle": 500.0
+ },
+ "run": {
+  "lammps_exe": "",
+  "prefix": "",
+  "extra_args": "",
+  "n_jobs": 4,
+  "threads": 1,
+  "timeout": 0.0,
+  "keep_trajectories": false
+ },
+ "out_dir": "fit_out"
+}

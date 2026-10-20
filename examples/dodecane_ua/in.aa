@@ -1,0 +1,37 @@
+# TraPPE-UA n-dodecane, 300 K, 1 atm   (cgdpd-fit example; ~1 min on a few cores)
+units           real
+atom_style      full
+boundary        p p p
+pair_style      lj/cut 14.0
+pair_modify     mix arithmetic tail yes
+bond_style      harmonic
+angle_style     harmonic
+dihedral_style  opls
+special_bonds   lj 0.0 0.0 0.0
+read_data       dodecane.data
+
+pair_coeff      1 1 0.194745 3.75     # CH3: eps/kB = 98 K
+pair_coeff      2 2 0.091411 3.95     # CH2: eps/kB = 46 K
+bond_coeff      1 450.0 1.54
+angle_coeff     1 62.1 114.0
+dihedral_coeff  1 1.411 -0.271 3.145 0.0
+
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+velocity        all create 300.0 4928459 mom yes rot yes dist gaussian
+thermo          1000
+thermo_style    custom step temp press density pe
+
+# compress the dilute start structure
+fix             1 all npt temp 300 300 100 iso 500 1 1000
+timestep        1.0
+run             50000
+unfix           1
+
+# equilibrate and sample
+fix             1 all npt temp 300 300 100 iso 1 1 1000
+run             50000
+dump            1 all custom 1000 aa.lammpstrj id mol type x y z ix iy iz
+dump_modify     1 sort id
+run             200000
+write_data      dodecane_final.data
