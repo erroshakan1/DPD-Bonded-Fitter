@@ -11,8 +11,8 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
     QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..core.cgbuild import STYLES, CGSystemSettings
 from ..core.distributions import ScoreSettings, compute_distributions
+from ..core.flory import bead_molar_volume
 from ..core.fit import AAInput, FitJob, Project, count_frames, load_topology, map_aa
 from ..core.mapping import FrameSelection, reference_beads
 from ..core.model import CENTER_LABELS, CENTERS, Bead, CGModel, auto_chain_model
@@ -196,17 +197,47 @@ class MainWindow(QMainWindow):
         self.btn_draw = QToolButton()
         self.btn_draw.setText("Draw bonds")
         self.btn_draw.setCheckable(True)
-        self.btn_draw.setToolTip("Click two beads to add (or remove) a CG bond between them")
+        self.btn_draw.setToolTip("Click two beads to add (or remove) a CG bond between them.\n"
+                                 "Switches 'Auto bonds' off.")
+        self.btn_new = QToolButton()
+        self.btn_new.setText("+ Bead")
+        self.btn_new.setToolTip("New empty bead (Insert key); then click or Shift+drag atoms on the left")
+        self.btn_new.clicked.connect(self.add_bead)
+        self.btn_delb = QToolButton()
+        self.btn_delb.setText("− Bead")
+        self.btn_delb.setToolTip("Delete the selected bead")
+        self.btn_delb.clicked.connect(self.remove_bead)
+        self.btn_clearb = QToolButton()
+        self.btn_clearb.setText("Clear")
+        self.btn_clearb.setToolTip("Remove all atoms from the selected bead")
+        self.btn_clearb.clicked.connect(self.clear_bead)
+        self.btn_rename = QToolButton()
+        self.btn_rename.setText("Rename")
+        self.btn_rename.setToolTip("Name and type of the selected bead (F2, or double-click the bead)")
+        self.btn_rename.clicked.connect(lambda: self.rename_bead(self.active_bead))
+        self.chk_auto_bonds = QCheckBox("Auto bonds")
+        self.chk_auto_bonds.setChecked(True)
+        self.chk_auto_bonds.setToolTip("Keep CG bonds (beads sharing an all-atom bond) and angles\n"
+                                       "up to date while you map atoms")
+        self.chk_sel_new = QCheckBox("Selection → new bead")
+        self.chk_sel_new.setToolTip("Every Shift+drag selection in the all-atom view becomes a new bead")
         self.spn_instance = _ispin(1, 1, 1, prefix="molecule ")
         aa_panel = QWidget()
         la = QVBoxLayout(aa_panel)
-        la.addWidget(_hline(QLabel("<b>All-atom</b>"), 1, self.chk_h, self.chk_aa_labels, self.cmb_color,
-                            self.spn_instance))
+        la.addWidget(_hline(QLabel("<b>All-atom</b>"), 1, self.chk_sel_new, self.chk_h, self.chk_aa_labels,
+                            self.cmb_color, self.spn_instance))
         la.addWidget(self.aa_view, 1)
         cg_panel = QWidget()
         lc = QVBoxLayout(cg_panel)
-        lc.addWidget(_hline(QLabel("<b>Coarse-grained</b>"), 1, self.btn_draw, self.chk_skeleton,
-                            self.chk_cg_labels))
+        lc.addWidget(_hline(QLabel("<b>Coarse-grained</b>"), 1, self.chk_skeleton, self.chk_cg_labels))
+        lc.addWidget(_hline(self.btn_new, self.btn_delb, self.btn_rename, self.btn_clearb, self.btn_draw,
+                            self.chk_auto_bonds, 1))
+        hint = QLabel("<i>+ Bead</i>, then click atoms on the left (Shift+drag selects a group). "
+                      "Click a bead here to continue with it; keys 1-9 select beads.")
+        hint.setWordWrap(True)
+        hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        hint.setStyleSheet("color: palette(placeholder-text)")
+        lc.addWidget(hint)
         lc.addWidget(self.cg_view, 3)
         self.topo_tabs = QTabWidget()
         self.tbl_bonds = self._topo_table(["Beads", "Group", "AA mean (Å)"])
@@ -215,8 +246,9 @@ class MainWindow(QMainWindow):
         self.topo_tabs.addTab(self.tbl_angles, "Angles")
         btn_del = QPushButton("Remove selected")
         btn_del.clicked.connect(self.remove_selected_terms)
-        btn_regroup = QPushButton("Groups by bead type")
-        btn_regroup.setToolTip("Reset group labels: equal bead types -> one bond/angle type")
+        btn_regroup = QPushButton("Groups by bead name")
+        btn_regroup.setToolTip("Reset group labels: bonds/angles between beads of equal names share one type\n"
+                               "(e.g. all tail beads named C -> one C-C bond and one C-C-C angle)")
         btn_regroup.clicked.connect(self.regroup)
         btn_unique = QPushButton("One group each")
         btn_unique.clicked.connect(self.unique_groups)
@@ -233,8 +265,16 @@ class MainWindow(QMainWindow):
         self.lbl_dist = QLabel("")
         self.lbl_dist.setWordWrap(True)
         self.lbl_dist.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.spn_bond_bin = _dspin(0.005, 5.0, 0.1, 3, 0.05, " Å")
+        self.spn_bond_bin.setToolTip("Histogram bin width of the bond distributions")
+        self.spn_angle_bin = _dspin(0.5, 45.0, 2.5, 1, 0.5, " °")
+        self.spn_angle_bin.setToolTip("Histogram bin width of the angle distributions")
+        for w in (self.spn_bond_bin, self.spn_angle_bin):
+            w.valueChanged.connect(lambda _v: self.show_reference())
         wd = QWidget()
         ld = QVBoxLayout(wd)
+        ld.addWidget(_hline(QLabel("Resolution:  bonds"), self.spn_bond_bin, QLabel("angles"),
+                            self.spn_angle_bin, 1))
         ld.addWidget(self.lbl_dist)
         ld.addWidget(self.canvas_dist, 1)
         self.tabs.addTab(wd, "Distributions")
@@ -315,14 +355,9 @@ class MainWindow(QMainWindow):
         self.tbl_beads.setMinimumHeight(170)
         self.tbl_beads.itemSelectionChanged.connect(self.on_bead_row_selected)
         self.tbl_beads.itemChanged.connect(self.on_bead_edited)
-        v2.addWidget(self.tbl_beads)
-        b_add = QPushButton("Add bead")
-        b_add.clicked.connect(self.add_bead)
-        b_del = QPushButton("Remove bead")
-        b_del.clicked.connect(self.remove_bead)
-        b_clear = QPushButton("Clear atoms")
-        b_clear.clicked.connect(self.clear_bead)
-        v2.addWidget(_hline(b_add, b_del, b_clear))
+        self.topo_tabs.insertTab(0, self.tbl_beads, "Beads")
+        self.topo_tabs.setCurrentIndex(0)
+        v2.addWidget(QLabel("Draw beads in the CG panel of the <i>Mapping</i> tab, or:"))
         self.spn_auto = _ispin(1, 200, 3, suffix=" beads")
         b_auto = QPushButton("Auto (chain)")
         b_auto.setToolTip("Split the longest heavy-atom chain into consecutive beads")
@@ -508,6 +543,16 @@ class MainWindow(QMainWindow):
         self.cmb_color.currentIndexChanged.connect(lambda _i: self.refresh_views(False))
         self.spn_instance.valueChanged.connect(lambda _v: self.refresh_views(False))
         self.btn_draw.toggled.connect(self._draw_toggled)
+        self._syncing = False
+        self.aa_view.viewChanged.connect(lambda: self._sync_camera(self.aa_view, self.cg_view))
+        self.cg_view.viewChanged.connect(lambda: self._sync_camera(self.cg_view, self.aa_view))
+        QShortcut(QKeySequence(Qt.Key_Insert), self, activated=self.add_bead)
+        QShortcut(QKeySequence(Qt.Key_F2), self, activated=lambda: self.rename_bead(self.active_bead))
+        self.cg_view.atomDoubleClicked.connect(self.rename_bead)
+        self.tbl_beads.horizontalHeaderItem(0).setToolTip(
+            "Double-click to rename. Names may repeat: beads with equal names share bond/angle types")
+        self.tbl_beads.horizontalHeaderItem(1).setToolTip(
+            "Non-bonded (pair coefficient) type; equals the name unless you change it")
         for k in range(9):
             QShortcut(QKeySequence(str(k + 1)), self, activated=lambda k=k: self.set_active_bead(k))
         for w in (self.spn_start, self.spn_stop, self.spn_stride, self.spn_maxmol):
@@ -700,12 +745,30 @@ class MainWindow(QMainWindow):
         self.refresh_all(reset=True)
 
     # ============================================================= mapping
-    def _edit(self, fn, topology_changed: bool = False):
+    def _edit(self, fn, mapping_changed: bool = False):
         if self.model is None:
             return
         fn(self.model)
+        if mapping_changed:
+            self._auto_topology()
         self.invalidate_reference()
         self.refresh_all(reset=False)
+
+    def _auto_topology(self):
+        """Bonds and angles follow the mapping while 'Auto bonds' is on."""
+        if self.chk_auto_bonds.isChecked() and self.model is not None and self.species is not None:
+            self.model.bonds_from_atoms(self.species, keep_groups=True)
+            self.model.angles_from_bonds(keep_groups=True)
+
+    def _sync_camera(self, src: MoleculeView, dst: MoleculeView):
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            dst.rot = src.rot.copy()       # same viewing direction; zoom/pan stay per panel
+            dst.update()
+        finally:
+            self._syncing = False
 
     def set_active_bead(self, k: int):
         if self.model is None or not (0 <= k < self.model.n_beads):
@@ -727,6 +790,7 @@ class MainWindow(QMainWindow):
         m.beads.append(Bead(f"B{k}", f"B{k}"))
         self.active_bead = m.n_beads - 1
         self.refresh_all(False)
+        self.cg_view.set_info(f"{m.beads[-1].name}: click atoms on the left")
 
     def remove_bead(self):
         m = self.model
@@ -741,12 +805,13 @@ class MainWindow(QMainWindow):
         m.angles = [tuple(i - (i > k) for i in a) for a, _ in keep_a]
         m.angle_groups = [g for _, g in keep_a]
         self.active_bead = max(0, min(k, m.n_beads - 1))
+        self._auto_topology()
         self.invalidate_reference()
         self.refresh_all(False)
 
     def clear_bead(self):
         if self.model and self.model.n_beads:
-            self._edit(lambda m: setattr(m.beads[self.active_bead], "atoms", []))
+            self._edit(lambda m: setattr(m.beads[self.active_bead], "atoms", []), mapping_changed=True)
 
     def auto_map(self):
         if self.species is None:
@@ -770,15 +835,18 @@ class MainWindow(QMainWindow):
 
     def unique_groups(self):
         def f(m):
-            m.bond_groups = [f"{m.beads[i].name}-{m.beads[j].name}" for i, j in m.bonds]
-            m.angle_groups = [f"{m.beads[i].name}-{m.beads[j].name}-{m.beads[k].name}" for i, j, k in m.angles]
+            m.bond_groups = ["-".join(m.bead_label(i) for i in b) for b in m.bonds]
+            m.angle_groups = ["-".join(m.bead_label(i) for i in a) for a in m.angles]
         self._edit(f)
 
     def remove_selected_terms(self):
         m = self.model
         if m is None:
             return
-        if self.topo_tabs.currentIndex() == 0:
+        if self.topo_tabs.currentWidget() is self.tbl_beads:
+            self.remove_bead()
+            return
+        if self.topo_tabs.currentWidget() is self.tbl_bonds:
             rows = sorted({i.row() for i in self.tbl_bonds.selectedIndexes()}, reverse=True)
             for r in rows:
                 del m.bonds[r]
@@ -801,6 +869,43 @@ class MainWindow(QMainWindow):
             self.active_bead = rows[0].row()
             self.refresh_views(False)
 
+    def rename_bead(self, k: int):
+        m = self.model
+        if m is None or not (0 <= k < m.n_beads) or self.btn_draw.isChecked():
+            return
+        b = m.beads[k]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Bead {k + 1}")
+        form = QFormLayout(dlg)
+        ed_name = QLineEdit(b.name)
+        ed_type = QLineEdit(b.type)
+        follow = [b.type == b.name]       # the type follows the name until it is edited itself
+        ed_name.textEdited.connect(lambda t: follow[0] and ed_type.setText(t))
+        ed_type.textEdited.connect(lambda _t: follow.__setitem__(0, False))
+        ed_name.setToolTip("Beads with the same name share bond and angle types (e.g. all tail beads 'C')")
+        ed_type.setToolTip("Non-bonded (pair coefficient) type; equals the name unless you change it")
+        form.addRow("Name", ed_name)
+        form.addRow("Type", ed_type)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        ed_name.selectAll()
+        if not dlg.exec():
+            return
+        name = ed_name.text().strip().replace(" ", "_")
+        btype = ed_type.text().strip().replace(" ", "_")
+        if not name or not btype:
+            self.error("Rename", "Name and type must not be empty.")
+            return
+        if name != b.name:
+            old_auto = m.auto_labels()
+            b.name = name
+            m.follow_names(old_auto)        # equal names -> shared bond/angle groups
+            self.invalidate_reference()
+        b.type = btype
+        self.refresh_all(False)
+
     def on_bead_edited(self, item: QTableWidgetItem):
         m = self.model
         if m is None or item.row() >= m.n_beads:
@@ -810,16 +915,15 @@ class MainWindow(QMainWindow):
         if not txt:
             self.refresh_bead_table()
             return
-        if item.column() == 0:
+        if item.column() == 0 and txt != b.name:
+            old_auto = m.auto_labels()
+            if b.type == b.name:            # the type follows the name unless set separately
+                b.type = txt
             b.name = txt
+            m.follow_names(old_auto)        # equal names -> shared bond/angle groups
+            self.invalidate_reference()
         elif item.column() == 1:
-            old = b.type
-            b.type = txt
-            # groups that were derived from the bead types follow the new type name
-            if old != txt:
-                m.regroup_bonds()
-                m.regroup_angles()
-                self.invalidate_reference()
+            b.type = txt                    # non-bonded type only; groups are unchanged
         self.refresh_all(False)
 
     def on_group_edited(self, item: QTableWidgetItem):
@@ -837,15 +941,22 @@ class MainWindow(QMainWindow):
         self.invalidate_reference()
 
     def on_aa_clicked(self, i: int):
-        if self.model is None or self.model.n_beads == 0:
+        if self.model is None:
             return
-        self._edit(lambda m: m.toggle(self.active_bead, i, self.species))
+        if self.model.n_beads == 0:
+            self.add_bead()
+        self.cg_view.set_info("")
+        self._edit(lambda m: m.toggle(self.active_bead, i, self.species), mapping_changed=True)
 
     def on_aa_box(self, atoms: list):
-        if self.model is None or self.model.n_beads == 0:
+        m = self.model
+        if m is None:
             return
+        if m.n_beads == 0 or (self.chk_sel_new.isChecked() and m.beads[self.active_bead].atoms):
+            self.add_bead()
         heavy = [a for a in atoms if self.species.elements[a] != "H"] or atoms
-        self._edit(lambda m: m.assign(self.active_bead, heavy, self.species))
+        self.cg_view.set_info("")
+        self._edit(lambda m: m.assign(self.active_bead, heavy, self.species), mapping_changed=True)
 
     def _draw_toggled(self, on: bool):
         self._connect_first = None
@@ -868,6 +979,9 @@ class MainWindow(QMainWindow):
         self.cg_view.set_info("Draw bonds: click two beads")
         if a == b:
             return
+        if self.chk_auto_bonds.isChecked():
+            self.chk_auto_bonds.setChecked(False)
+            self.log("Auto bonds switched off: bonds are now edited by hand")
         if (a, b) in m.bonds:
             i = m.bonds.index((a, b))
             del m.bonds[i]
@@ -923,7 +1037,7 @@ class MainWindow(QMainWindow):
             t.blockSignals(True)
             t.setRowCount(len(terms))
             for r, (term, g) in enumerate(zip(terms, groups)):
-                it = QTableWidgetItem("-".join(m.beads[i].name for i in term))
+                it = QTableWidgetItem("-".join(m.bead_label(i) for i in term))
                 it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 t.setItem(r, 0, it)
                 t.setItem(r, 1, QTableWidgetItem(g))
@@ -973,18 +1087,20 @@ class MainWindow(QMainWindow):
         if m is None or m.n_beads == 0:
             self.cg_view.clear("Add beads")
             return
-        filled = [k for k, b in enumerate(m.beads) if b.atoms]
         pos = np.array(beads)
-        for k, b in enumerate(m.beads):
-            if not b.atoms:     # place empty beads next to the molecule so they can be clicked
-                pos[k] = x.mean(0) + np.array([0.0, -6.0 - 2.5 * k, 0.0])
+        # empty beads wait in a row above the molecule (screen frame of the views)
+        rot, center = self.aa_view.rot, self.aa_view.center
+        px = (x - center) @ rot.T
+        empty = [k for k, b in enumerate(m.beads) if not b.atoms]
+        for j, k in enumerate(empty):
+            p = np.array([px[:, 0].min() + 3.0 * j, px[:, 1].max() + 3.0, 0.0])
+            pos[k] = center + p @ rot
         rc = self.spn_rc.value()
         colors = [QColor(BEAD_COLORS[k % len(BEAD_COLORS)]) for k in range(m.n_beads)]
-        self.cg_view.set_molecule(pos, np.full(m.n_beads, 0.22 * rc), colors, m.bonds,
-                                  [b.name for b in m.beads], reset_view=reset or not filled)
-        if reset:       # look at the CG molecule from the same side as at the atoms
-            self.cg_view.rot = self.aa_view.rot.copy()
-            self.cg_view.center = self.aa_view.center.copy()
+        radii = np.array([0.22 * rc if b.atoms else 1.0 for b in m.beads])
+        self.cg_view.set_molecule(pos, radii, colors, m.bonds, [b.name for b in m.beads], reset_view=False)
+        self.cg_view.rot = self.aa_view.rot.copy()          # both panels look from the same side
+        self.cg_view.center = self.aa_view.center.copy()
         self.cg_view.set_alpha(150 if self.chk_skeleton.isChecked() else 255)
         self.cg_view.set_show_labels(self.chk_cg_labels.isChecked())
         self.cg_view.set_rings({min(self.active_bead, m.n_beads - 1): QColor(self.palette().highlight().color())})
@@ -995,6 +1111,9 @@ class MainWindow(QMainWindow):
             self.cg_view.set_overlay(x[heavy], [QColor("#707070")] * len(heavy), hb, radius=0.18)
         else:
             self.cg_view.set_overlay(np.zeros((0, 3)), [], [])
+        if reset or m.n_beads != getattr(self, "_fitted_beads", -1):
+            self.cg_view.fit_zoom()
+            self._fitted_beads = m.n_beads
 
     # ======================================================== distributions
     def invalidate_reference(self, *_):
@@ -1053,6 +1172,8 @@ class MainWindow(QMainWindow):
                             n_jobs=self.spn_jobs.value(), threads=self.spn_threads.value(),
                             keep_trajectories=self.chk_keep.isChecked())
         p.out_dir = self.ed_out.text().strip() or "cgdpd_out"
+        p.bond_bin = self.spn_bond_bin.value()
+        p.angle_bin = self.spn_angle_bin.value()
         return p
 
     def _parse_cycles(self, default):
@@ -1169,7 +1290,8 @@ class MainWindow(QMainWindow):
         cg = self.best.dists if self.best is not None and self.best.dists else {}
         cg = {k: v for k, v in cg.items() if k in self.ref}
         title = "all-atom (mapped)" + (f" vs best CG, score {self.best.score:.4f}" if cg else "")
-        draw_distributions(self.fig_dist, self.ref, cg, title, self.best.terms if cg else None)
+        draw_distributions(self.fig_dist, self.ref, cg, title, self.best.terms if cg else None,
+                           self.spn_bond_bin.value(), self.spn_angle_bin.value())
         self.canvas_dist.draw_idle()
         if p0 is not None:
             lines = [f"{k}: {d.mean:.3f} ± {d.std:.3f}" for k, d in self.ref.items()]
@@ -1264,18 +1386,32 @@ class MainWindow(QMainWindow):
         if not types:
             return
         c = self.cg_extra
+        fh = None
         if p.cg.style == "mdpd":
             tables = {"A (attraction)": (c.A_ij, self.spn_A.value()), "B (repulsion)": (c.B_ij, self.spn_B.value())}
         else:
             tables = {"a_ij": (c.a_ij, self.spn_a.value())}
-        dlg = PairDialog(types, tables, self)
-        if dlg.exec():
+            fh = {"delta": c.delta, "temperature": c.fh_temperature, "factor": c.fh_factor,
+                  "volume": bead_molar_volume(p.units.rc, p.cg.density), "a_ii": self.spn_a.value()}
+        dlg = PairDialog(types, tables, self, fh=fh)
+        if not dlg.exec():
+            return
+        try:
             vals = dlg.values()
-            if p.cg.style == "mdpd":
-                c.A_ij.update(vals["A (attraction)"])
-                c.B_ij.update(vals["B (repulsion)"])
-            else:
-                c.a_ij.update(vals["a_ij"])
+        except ValueError:
+            self.error("Pair coefficients", "Every filled cell must be a number; nothing was changed.")
+            return
+        if p.cg.style == "mdpd":
+            c.A_ij = vals["A (attraction)"]
+            c.B_ij = vals["B (repulsion)"]
+        else:
+            c.a_ij = vals["a_ij"]
+            try:
+                f = dlg.fh_settings()
+                c.delta, c.fh_temperature, c.fh_factor = f["delta"], f["temperature"], f["factor"]
+            except ValueError:
+                pass
+        self.log(f"Pair coefficients: {sum(len(v) for v in vals.values())} pairs set")
 
     # =========================================================== legacy import
     def import_legacy(self):
@@ -1374,6 +1510,8 @@ class MainWindow(QMainWindow):
         self.spn_threads.setValue(r.threads)
         self.chk_keep.setChecked(r.keep_trajectories)
         self.ed_out.setText(p.out_dir)
+        self.spn_bond_bin.setValue(p.bond_bin)
+        self.spn_angle_bin.setValue(p.angle_bin)
         self.load_aa()
         if self.topo is None:
             return

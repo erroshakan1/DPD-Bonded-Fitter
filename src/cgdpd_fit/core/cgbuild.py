@@ -46,6 +46,10 @@ class CGSystemSettings:
     a_default: float = 25.0
     a_ij: dict = field(default_factory=dict)       # "T1 T2" -> a
     gamma: float = 4.5
+    # Flory-Huggins helper of the pair table (core.flory): solubility parameter per type
+    delta: dict = field(default_factory=dict)      # type -> MPa^1/2
+    fh_temperature: float = 298.15
+    fh_factor: float = 3.27
     # mDPD (A < 0 attraction, B > 0 density-dependent repulsion, rd its cutoff)
     A_default: float = -40.0
     B_default: float = 25.0

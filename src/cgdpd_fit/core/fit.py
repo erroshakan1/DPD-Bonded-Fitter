@@ -61,6 +61,8 @@ class Project:
     optimizer: OptimizerSettings = field(default_factory=OptimizerSettings)
     run: RunSettings = field(default_factory=RunSettings)
     out_dir: str = "cgdpd_out"
+    bond_bin: float = 0.1            # histogram resolution of the plots, Angstrom
+    angle_bin: float = 2.5           # degrees (Swarm-CG default)
 
     def to_dict(self) -> dict:
         return {"version": 1, "aa": self.aa.to_dict(), "species": self.species,
@@ -68,7 +70,8 @@ class Project:
                 "frames": self.frames.to_dict(), "units": self.units.to_dict(),
                 "cg": self.cg.to_dict(), "angle_style": self.angle_style,
                 "scoring": self.scoring.to_dict(), "optimizer": self.optimizer.to_dict(),
-                "run": self.run.to_dict(), "out_dir": self.out_dir}
+                "run": self.run.to_dict(), "out_dir": self.out_dir,
+                "bond_bin": self.bond_bin, "angle_bin": self.angle_bin}
 
     @classmethod
     def from_dict(cls, d: dict, base: Path | None = None) -> "Project":
@@ -81,7 +84,8 @@ class Project:
                 angle_style=d.get("angle_style", "harmonic"),
                 scoring=ScoreSettings.from_dict(d.get("scoring", {})),
                 optimizer=OptimizerSettings.from_dict(d.get("optimizer", {})),
-                run=RunSettings.from_dict(d.get("run", {})), out_dir=d.get("out_dir", "cgdpd_out"))
+                run=RunSettings.from_dict(d.get("run", {})), out_dir=d.get("out_dir", "cgdpd_out"),
+                bond_bin=float(d.get("bond_bin", 0.1)), angle_bin=float(d.get("angle_bin", 2.5)))
         if base is not None:          # relative paths are relative to the project file
             for k in ("data", "dump", "tpr", "traj"):
                 v = getattr(p.aa, k)
@@ -382,7 +386,8 @@ class FitJob:
         try:
             from ..plots import plot_distributions
             plot_distributions(ref, r.dists or {}, d / "distributions.png",
-                               title=f"best fit: score {r.score:.4f} (e{r.index:04d})")
+                               title=f"best fit: score {r.score:.4f} (e{r.index:04d})",
+                               bond_bin=self.p.bond_bin, angle_bin=self.p.angle_bin)
         except Exception as exc:  # noqa: BLE001 - plotting is optional
             self.log(f"plot warning: {exc}")
 

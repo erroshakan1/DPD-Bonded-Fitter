@@ -118,7 +118,7 @@ def test_species_mapping_charges_and_dump(tmp_path):
 
 @pytest.mark.parametrize("style", ["dpd", "dpd_q", "mdpd"])
 def test_build_system_writes_consistent_files(tmp_path, style):
-    m = CGModel(beads=[Bead("A", "A", [0]), Bead("B", "B", [1]), Bead("C", "A", [2])],
+    m = CGModel(beads=[Bead("A", "A", [0]), Bead("B", "B", [1]), Bead("A", "A", [2])],
                 bonds=[(0, 1), (1, 2)], angles=[(0, 1, 2)])
     m.regroup_bonds()
     m.regroup_angles()
@@ -136,3 +136,40 @@ def test_build_system_writes_consistent_files(tmp_path, style):
         assert abs(data.charges.sum()) < 1e-6
     assert "bond_coeff 1 100 0.8  # A-B" in (b.workdir / "params.lmp").read_text()
     assert b.solute_ids.shape == (10, 3)
+
+
+def test_histogram_edges_follow_the_requested_resolution():
+    from cgdpd_fit.core.distributions import common_edges
+    a = Dist("angle", "a", np.array([100.0, 120.0]))
+    e = common_edges([a], "angle", 10.0)
+    assert e[0] == 0.0 and e[-1] == 180.0 and np.allclose(np.diff(e), 10.0)
+    b = Dist("bond", "b", np.array([3.93, 4.41]))
+    e = common_edges([b], "bond", 0.1)
+    assert np.allclose(np.diff(e), 0.1) and e[0] <= 3.93 and e[-1] >= 4.41
+
+
+def test_flory_huggins_aij():
+    from cgdpd_fit.core.flory import aij_from_solubility, bead_molar_volume, chi
+    v = bead_molar_volume(6.46, 3.0)
+    assert v == pytest.approx(54.0, rel=0.01)           # 90 A^3 per bead
+    c = chi(47.8, 16.0, v, 298.15)
+    assert c == pytest.approx(v * 31.8 ** 2 / (8.314462618 * 298.15))
+    a, x = aij_from_solubility({"W": 47.8, "C": 16.0}, v, 298.15, 25.0, 3.27)
+    assert a["W W"] == pytest.approx(25.0) and a["C C"] == pytest.approx(25.0)
+    assert a["W C"] == pytest.approx(25.0 + 3.27 * x["W C"])
+
+
+def test_equal_bead_names_share_bond_and_angle_groups():
+    m = CGModel(beads=[Bead("H", "H", [0])] + [Bead("C", "C", [k]) for k in range(1, 5)],
+                bonds=[(0, 1), (1, 2), (2, 3), (3, 4)])
+    m.regroup_bonds()
+    m.angles_from_bonds()
+    assert m.bond_group_names() == ["C-H", "C-C"]
+    assert m.angle_group_names() == ["C-C-H", "C-C-C"]
+    assert m.bonds_in("C-C") == [(1, 2), (2, 3), (3, 4)]
+    # renaming keeps hand-made group labels, updates automatic ones
+    m.bond_groups[0] = "head"
+    old = m.auto_labels()
+    m.beads[0].name = "N"
+    m.follow_names(old)
+    assert m.bond_groups[0] == "head" and m.angle_groups[0] == "C-C-N"

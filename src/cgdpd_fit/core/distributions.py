@@ -142,19 +142,15 @@ def score(ref: dict[str, Dist], cg: dict[str, Dist], st: ScoreSettings | None = 
     return total, terms
 
 
-def common_edges(dists: list[Dist], kind: str) -> np.ndarray:
-    """Histogram edges for plotting; the bin width follows the Freedman-Diaconis rule of the
-    first (reference) distribution, so sparse all-atom data are not over-resolved."""
-    ref = dists[0].samples if dists and len(dists[0].samples) > 1 else np.zeros(2)
-    q75, q25 = np.percentile(ref, [75, 25])
-    h = 2.0 * (q75 - q25) * len(ref) ** (-1.0 / 3.0)
+def common_edges(dists: list[Dist], kind: str, width: float) -> np.ndarray:
+    """Histogram edges with bin ``width`` (Angstrom for bonds, degrees for angles) covering
+    all given distributions; bonds use multiples of ``width`` as edges, angles 0-180."""
+    width = float(width)
+    if width <= 0:
+        raise ValueError("bin width must be positive")
     if kind == "angle":
-        h = float(np.clip(h, ANGLE_BIN, 10.0)) if h > 0 else ANGLE_BIN
-        nb = int(round(180.0 / h))
-        return np.linspace(0.0, 180.0, nb + 1)
-    allv = np.concatenate([d.samples for d in dists if len(d.samples)])
-    lo, hi = np.percentile(allv, [0.05, 99.95]) if len(allv) > 1 else (0.0, 1.0)
-    pad = 0.15 * max(hi - lo, 0.1)
-    lo, hi = max(0.0, lo - pad), hi + pad
-    nb = int(np.clip((hi - lo) / h, 20, BOND_BINS)) if h > 0 else BOND_BINS
-    return np.linspace(lo, hi, nb + 1)
+        return np.append(np.arange(0.0, 180.0, width), 180.0)
+    allv = np.concatenate([d.samples for d in dists if len(d.samples)]) if dists else np.zeros(1)
+    lo = np.floor(allv.min() / width) * width - width
+    hi = np.ceil(allv.max() / width) * width + width
+    return np.arange(max(0.0, lo), hi + 0.5 * width, width)

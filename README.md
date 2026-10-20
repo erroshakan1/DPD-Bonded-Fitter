@@ -17,7 +17,10 @@ or many-body DPD (mDPD) models with LAMMPS. Swarm-CG–style optimisation, writt
 2. **Mapping.** Click atoms of the species into beads (hydrogens follow their heavy atom),
    or start from *Auto (chain)*. CG bonds come from the all-atom connectivity (or draw them
    bead to bead), angles from the bonds. Terms with the same **group** label share one LAMMPS
-   type and are fitted together; by default the group follows the bead types.
+   type and are fitted together. By default the group follows the bead **names**, and names may
+   repeat: name all tail beads of a lipid `C` and every tail bond becomes one `C-C` type and
+   every tail angle one `C-C-C` type, fitted to the pooled all-atom distribution. The bead
+   *type* only selects the pair coefficients and equals the name unless you change it.
 3. **DPD units.** `r_c` in Å (`r_c = (ρ N_m 30 Å³)^(1/3)`, 6.46 Å for N_m = 3, ρ = 3).
 4. **CG system.** `dpd` (`atom_style angle`), `dpd_q` (`atom_style full`,
    `dpd/coul/slater/long` + Ewald, bead charge = sum of its atomic charges, counter-ion beads),
@@ -105,8 +108,8 @@ lmp -in in.aa                    # NPT 300 K, 1 atm -> aa.lammpstrj, dodecane_fi
    * *Load*. One species is found: `S1: C12`, 100 molecules.
 2. Make the mapping:
    * *Auto (chain)* with 3 beads splits each chain into 4 + 4 + 4 carbons.
-   * Rename the bead types to `E`, `M`, `E`. Both bonds then fall into group `E-M` and
-     the angle into `E-M-E`.
+   * Rename the beads `E`, `M`, `E` (double-click a bead or F2). Both bonds then fall into
+     group `E-M` and the angle into `E-M-E`.
 3. DPD units: set *r_c* = 7.2 Å (300 beads at density 3 in the 33.4 Å box).
 4. CG system: *match the all-atom system*, untick *Add solvent beads* (bulk liquid).
 5. *Compute AA distributions* shows the mapped bond and angle distributions.

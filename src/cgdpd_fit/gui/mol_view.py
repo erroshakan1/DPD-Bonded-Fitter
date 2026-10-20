@@ -23,6 +23,8 @@ class MoleculeView(QWidget):
     atomClicked = Signal(int)
     atomsBoxSelected = Signal(list)
     atomHovered = Signal(int)          # -1 when nothing is under the cursor
+    viewChanged = Signal()             # rotation, zoom or pan changed by the user
+    atomDoubleClicked = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,6 +130,31 @@ class MoleculeView(QWidget):
         w, h = max(self.width(), 50), max(self.height(), 50)
         self.zoom = 0.45 * min(w / ext[0], h / ext[1])
         self.pan = np.zeros(2)
+        self.update()
+        self.viewChanged.emit()
+
+    def camera(self) -> tuple:
+        return self.rot.copy(), self.center.copy(), float(self.zoom), self.pan.copy()
+
+    def fit_zoom(self) -> None:
+        """Keep rotation and centre, choose zoom/pan so that atoms and overlay fit the widget."""
+        pts = [self.pos[self.visible]] if len(self.pos) else []
+        if len(self.overlay_pos):
+            pts.append(self.overlay_pos)
+        if not pts or not sum(len(p) for p in pts):
+            return
+        p = (np.concatenate(pts) - self.center) @ self.rot.T
+        r = self.radii.max(initial=0.5)
+        lo, hi = p[:, :2].min(0) - r, p[:, :2].max(0) + r
+        w, h = max(self.width(), 50), max(self.height(), 50)
+        self.zoom = 0.9 * min(w / max(hi[0] - lo[0], 1e-6), h / max(hi[1] - lo[1], 1e-6))
+        mid = 0.5 * (lo + hi)
+        self.pan = np.array([-mid[0] * self.zoom, mid[1] * self.zoom])
+        self.update()
+
+    def set_camera(self, cam: tuple) -> None:
+        """Adopt the camera of another view (no viewChanged signal)."""
+        self.rot, self.center, self.zoom, self.pan = (cam[0].copy(), cam[1].copy(), cam[2], cam[3].copy())
         self.update()
 
     # ------------------------------------------------------------ projection
@@ -338,6 +365,8 @@ class MoleculeView(QWidget):
         elif btn in (Qt.RightButton, Qt.MiddleButton):
             self.pan += (dx, dy)
         self.update()
+        if self._band is None:
+            self.viewChanged.emit()
 
     def mouseReleaseEvent(self, ev):
         if self._press is None:
@@ -362,8 +391,10 @@ class MoleculeView(QWidget):
     def mouseDoubleClickEvent(self, ev):
         # fast consecutive clicks on atoms must still count as clicks
         p = ev.position()
-        if ev.button() == Qt.LeftButton and self._pick(p.x(), p.y()) >= 0:
+        i = self._pick(p.x(), p.y()) if ev.button() == Qt.LeftButton else -1
+        if i >= 0:
             self.mousePressEvent(ev)
+            self.atomDoubleClicked.emit(i)
         else:
             self.reset_view()
 
@@ -371,6 +402,7 @@ class MoleculeView(QWidget):
         f = 1.0015 ** ev.angleDelta().y()
         self.zoom = float(np.clip(self.zoom * f, 0.5, 2000))
         self.update()
+        self.viewChanged.emit()
 
     def leaveEvent(self, _ev):
         if self._hover != -1:

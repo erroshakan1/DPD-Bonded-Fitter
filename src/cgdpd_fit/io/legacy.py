@@ -51,15 +51,11 @@ def read_legacy(topo: AATopology, ndx: str | Path, bonds_map: str | Path | None 
         raise ValueError(f"{ndx}: atom {first + 1} is not part of any molecule")
     si, sp, pos = where
     model = CGModel()
-    seen: dict[str, int] = {}
     for (name, _), atoms in zip(groups, beads_atoms):
         missing = [a + 1 for a in atoms if a not in pos]
         if missing:
             raise ValueError(f"{ndx}: bead {name} has atoms outside the molecule: {missing[:5]}")
         btype = re.sub(r"_\d+$", "", name)
-        seen[name] = seen.get(name, 0) + 1
-        if seen[name] > 1:                 # repeated group names: C, C_2, C_3, ...
-            name = f"{name}_{seen[name]}"
         model.beads.append(Bead(name, btype, sorted(pos[a] for a in atoms)))
     if bonds_map:
         for tid, rows in _sections(bonds_map):

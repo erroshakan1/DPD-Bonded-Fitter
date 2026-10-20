@@ -15,7 +15,7 @@
   "center": "com",
   "beads": [
    {
-    "name": "E1",
+    "name": "E",
     "type": "E",
     "atoms": [
      0,
@@ -35,7 +35,7 @@
     ]
    },
    {
-    "name": "E2",
+    "name": "E",
     "type": "E",
     "atoms": [
      8,

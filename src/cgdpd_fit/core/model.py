@@ -2,8 +2,10 @@
 
 Bonds and angles that share a *group* label share one LAMMPS bond/angle type and are fitted
 together (all their instances are pooled into one distribution). The default group label
-is built from the bead types, so chemically equivalent bonds (e.g. the two tails of a lipid)
-end up in the same group; edit the labels to split or merge groups.
+is built from the bead *names*, and names need not be unique: naming all tail beads of a
+lipid ``C`` puts every tail bond into one ``C-C`` group and every tail angle into ``C-C-C``.
+Edit the labels to split or merge groups by hand. The bead *type* only selects the
+non-bonded (pair) parameters; by default it equals the name.
 """
 from __future__ import annotations
 
@@ -115,18 +117,22 @@ class CGModel:
         return q
 
     # ------------------------------------------------------------ topology
-    def bonds_from_atoms(self, sp: Species) -> None:
-        """CG bonds wherever an all-atom bond connects two different beads."""
+    def bonds_from_atoms(self, sp: Species, keep_groups: bool = False) -> None:
+        """CG bonds wherever an all-atom bond connects two different beads.
+
+        With ``keep_groups`` bonds that existed before keep their (possibly edited) group label.
+        """
         own = self.owner(sp.n_atoms)
         pairs = set()
         for a, b in sp.bonds:
             i, j = own[a], own[b]
             if i >= 0 and j >= 0 and i != j:
                 pairs.add((min(i, j), max(i, j)))
+        old = dict(zip(self.bonds, self.bond_groups)) if keep_groups else {}
         self.bonds = sorted((int(i), int(j)) for i, j in pairs)
-        self.regroup_bonds()
+        self.bond_groups = [old.get(b, self.bond_label(b)) for b in self.bonds]
 
-    def angles_from_bonds(self) -> None:
+    def angles_from_bonds(self, keep_groups: bool = False) -> None:
         nb = defaultdict(set)
         for i, j in self.bonds:
             nb[i].add(j)
@@ -137,17 +143,32 @@ class CGModel:
             for x in range(len(ns)):
                 for y in range(x + 1, len(ns)):
                     out.append((ns[x], c, ns[y]))
+        old = dict(zip(self.angles, self.angle_groups)) if keep_groups else {}
         self.angles = out
-        self.regroup_angles()
+        self.angle_groups = [old.get(a, self.angle_label(a)) for a in out]
+
+    def bead_label(self, k: int) -> str:
+        """Unambiguous label of bead ``k`` (names may repeat): name#number."""
+        return f"{self.beads[k].name}#{k + 1}"
 
     def bond_label(self, bond: tuple[int, int]) -> str:
-        t = sorted((self.beads[bond[0]].type, self.beads[bond[1]].type))
+        t = sorted((self.beads[bond[0]].name, self.beads[bond[1]].name))
         return "-".join(t)
 
     def angle_label(self, angle: tuple[int, int, int]) -> str:
-        a, c, b = (self.beads[i].type for i in angle)
+        a, c, b = (self.beads[i].name for i in angle)
         a, b = sorted((a, b))
         return f"{a}-{c}-{b}"
+
+    def auto_labels(self) -> tuple[list[str], list[str]]:
+        return [self.bond_label(b) for b in self.bonds], [self.angle_label(a) for a in self.angles]
+
+    def follow_names(self, old_auto: tuple[list[str], list[str]]) -> None:
+        """After bead names changed: groups that still had their automatic label get the new
+        automatic label; groups the user renamed by hand are kept."""
+        new_b, new_a = self.auto_labels()
+        self.bond_groups = [n if g == o else g for g, o, n in zip(self.bond_groups, old_auto[0], new_b)]
+        self.angle_groups = [n if g == o else g for g, o, n in zip(self.angle_groups, old_auto[1], new_a)]
 
     def regroup_bonds(self) -> None:
         self.bond_groups = [self.bond_label(b) for b in self.bonds]
@@ -175,10 +196,6 @@ class CGModel:
         empty = [b.name for b in self.beads if not b.atoms]
         if empty:
             msgs.append("empty beads: " + ", ".join(empty))
-        names = [b.name for b in self.beads]
-        dup = sorted({n for n in names if names.count(n) > 1})
-        if dup:
-            msgs.append("duplicate bead names: " + ", ".join(dup))
         own = self.owner(sp.n_atoms)
         un = [k for k in np.flatnonzero(own < 0) if sp.elements[k] != "H"]
         if un:
