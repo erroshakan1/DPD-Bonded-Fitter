@@ -75,6 +75,7 @@ class AATopology:
     pos: np.ndarray            # (N, 3) reference coordinates
     box: Box
     source: str = ""
+    names: list[str] = field(default_factory=list)      # atom names (GROMACS) or type labels
     species: list[Species] = field(default_factory=list)
     adj: list[list[int]] = field(default_factory=list)
 
@@ -157,7 +158,8 @@ def from_lammps_data(d: LammpsData) -> AATopology:
     elements = [element_from_mass(m) for m in masses]
     return AATopology(ids=d.ids, mol=d.mol, types=d.types, type_names=dict(d.type_labels),
                       masses=masses, charges=d.charges, elements=elements, bonds=bonds,
-                      pos=d.pos, box=d.box, source=d.path)
+                      pos=d.pos, box=d.box, source=d.path,
+                      names=[d.type_name(t) for t in d.types])
 
 
 # ------------------------------------------------------------------ whole molecules

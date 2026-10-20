@@ -18,6 +18,9 @@ import numpy as np
 from .params import BondedParams
 
 
+CYCLE_WHAT = {"all": "bonds + angles", "bonds": "bonds only", "angles": "angles only"}
+
+
 @dataclass
 class CycleSpec:
     what: str = "all"            # "all" | "bonds" | "angles"
@@ -37,12 +40,14 @@ DEFAULT_CYCLES = [CycleSpec("all", 3.0, 0.20, 20.0),
 @dataclass
 class OptimizerSettings:
     method: str = "ibi+pso"          # "ibi" | "pso" | "ibi+pso"
-    ibi_iterations: int = 6
+    ibi_iterations: int = 10         # maximum; stops earlier when the score levels off
     ibi_alpha: float = 0.7
     cycles: list = field(default_factory=lambda: [CycleSpec(**c.to_dict()) for c in DEFAULT_CYCLES])
     swarm_size: int = 0              # 0: 10 + 2 sqrt(D) (FST-PSO / Swarm-CG default)
     max_steps: int = 0               # 0: 8 + sqrt(D)
-    patience: int = 4                # PSO steps without improvement before a cycle stops
+    patience: int = 4                # PSO steps / IBI iterations without improvement before stopping
+    auto_stop: bool = True           # stop a stage once the score improves less than ``tolerance``
+    tolerance: float = 0.01          # relative improvement that still counts (0.01 = 1 %)
     seed: int = 12345
     k_min: float = 0.1
     k_max_bond: float = 5000.0
@@ -62,6 +67,41 @@ class OptimizerSettings:
             elif hasattr(s, k):
                 setattr(s, k, v)
         return s
+
+
+# Ready-made settings. Every stage stops by itself once the best score improves by less
+# than ``tolerance`` for ``patience`` steps (as the early stopping of Swarm-CG); the numbers
+# below are only upper limits.
+PRESETS = {
+    "quick": dict(method="ibi+pso", ibi_iterations=6, patience=3, tolerance=0.02,
+                  cycles=[CycleSpec("all", 2.0, 0.10, 10.0)]),
+    "standard": dict(method="ibi+pso", ibi_iterations=10, patience=4, tolerance=0.01,
+                     cycles=[CycleSpec(**c.to_dict()) for c in DEFAULT_CYCLES]),
+    "thorough": dict(method="ibi+pso", ibi_iterations=15, patience=6, tolerance=0.005,
+                     cycles=[CycleSpec("all", 4.0, 0.25, 25.0)] + [CycleSpec(**c.to_dict()) for c in DEFAULT_CYCLES]),
+}
+PRESET_HELP = {
+    "quick": "moment matching + one PSO cycle; a first result in a short time",
+    "standard": "moment matching + three Swarm-CG cycles (wide search, angles, fine tuning)",
+    "thorough": "longer patience, an extra wide cycle, stops only below 0.5 % improvement",
+}
+
+
+def preset(name: str, base: OptimizerSettings | None = None) -> OptimizerSettings:
+    s = OptimizerSettings.from_dict(base.to_dict()) if base else OptimizerSettings()
+    for k, v in PRESETS[name].items():
+        setattr(s, k, [CycleSpec(**c.to_dict()) for c in v] if k == "cycles" else v)
+    s.swarm_size = 0
+    s.max_steps = 0
+    s.auto_stop = True
+    return s
+
+
+def improved(new: float, best: float, tol: float) -> bool:
+    """``new`` beats ``best`` by more than the relative tolerance."""
+    if not np.isfinite(best):
+        return np.isfinite(new)
+    return best - new > tol * abs(best)
 
 
 @dataclass
@@ -99,9 +139,15 @@ class Tracker:
 # ----------------------------------------------------------------------- IBI
 def run_ibi(start: BondedParams, evaluate, update, st: OptimizerSettings, tracker: Tracker,
             log=print, should_stop=None) -> BondedParams:
-    """``update(params, cg_dists) -> params`` performs one moment-matching step."""
+    """``update(params, cg_dists) -> params`` performs one moment-matching step.
+
+    Stops after ``ibi_iterations`` updates, or earlier (``auto_stop``) when the best score
+    has not improved by more than ``tolerance`` for ``patience`` iterations.
+    """
     p = start
     last = None
+    best = float("inf")
+    stall = 0
     for it in range(st.ibi_iterations + 1):
         if should_stop and should_stop():
             break
@@ -115,6 +161,15 @@ def run_ibi(start: BondedParams, evaluate, update, st: OptimizerSettings, tracke
         tracker.add([res])
         log(f"  IBI {it}: score {res.score:.4f}" + ("" if res.ok else f"  FAILED: {res.message}"))
         last = res
+        score = res.score if res.ok else float("inf")
+        if improved(score, best, st.tolerance):
+            stall = 0
+        else:
+            stall += 1
+        best = min(best, score)
+        if st.auto_stop and stall >= min(st.patience, 2):
+            log(f"  IBI converged: less than {100 * st.tolerance:g} % improvement for {stall} iterations")
+            break
     return tracker.best.params if tracker.best else start
 
 
@@ -211,16 +266,16 @@ def run_pso(start: BondedParams, evaluate, st: OptimizerSettings, tracker: Track
             better = sc < pscore
             pbest[better] = X[better]
             pscore[better] = sc[better]
-            improved = False
+            gain = improved(float(np.min(sc)), gscore, st.tolerance)
             if np.min(sc) < gscore:
-                improved = gscore - np.min(sc) > 1e-3 * max(abs(gscore), 1e-9) or not np.isfinite(gscore)
                 gscore = float(np.min(sc))
                 gbest = X[int(np.argmin(sc))].copy()
-            stall = 0 if improved else stall + 1
+            stall = 0 if gain else stall + 1
             log(f"  step {step + 1}/{steps}: best {np.min(sc):.4f}, mean {np.mean(sc[np.isfinite(sc)]) if np.isfinite(sc).any() else float('inf'):.4f}, "
                 f"cycle best {gscore:.4f}")
-            if stall >= st.patience:
-                log(f"  no improvement for {st.patience} steps, cycle {ci} done")
+            if st.auto_stop and stall >= st.patience:
+                log(f"  converged: less than {100 * st.tolerance:g} % improvement for {st.patience} steps, "
+                    f"cycle {ci} done")
                 break
             r1 = rng.uniform(size=(n, D))
             r2 = rng.uniform(size=(n, D))

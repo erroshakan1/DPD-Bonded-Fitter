@@ -54,7 +54,8 @@ def load_topology(tpr: str, traj: str | None = None) -> AATopology:
         pos, dims = np.zeros((n, 3)), None
     return AATopology(ids=np.arange(1, n + 1), mol=mol, types=types,
                       type_names={v: k for k, v in tmap.items()}, masses=masses, charges=charges,
-                      elements=elements, bonds=bonds, pos=pos, box=_box(dims), source=tpr)
+                      elements=elements, bonds=bonds, pos=pos, box=_box(dims), source=tpr,
+                      names=[str(x) for x in a.names])
 
 
 def count_frames(tpr: str, traj: str) -> int:

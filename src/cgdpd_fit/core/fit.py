@@ -156,6 +156,57 @@ def map_aa(project: Project, topo: AATopology, progress=None, should_stop=None) 
     return map_lammps_dump(project.aa.dump, topo, sp, project.model, sel, progress, should_stop, n_total)
 
 
+def _species_frames(aa: AAInput, topo: AATopology, sp, start=0, stop=None, stride=1):
+    """(frame index, whole coordinates (n_mol, n_atoms, 3)) of all molecules of ``sp``."""
+    rows = sp.rows()
+    whole = WholeMaker.for_species(sp)
+    if aa.format == "gromacs":
+        from ..io.gromacs import iter_frames
+        frames = ((box, pos) for box, pos, _step in iter_frames(aa.tpr, aa.traj, rows, start, stop, stride))
+    else:
+        ids = topo.ids[rows.ravel()]
+        frames = ((fr.box, fr.pos.reshape(rows.shape + (3,)))
+                  for fr in iter_dump(aa.dump, ids=ids, start=start, stop=stop, stride=stride))
+    for k, (box, pos) in enumerate(frames):
+        yield start + k * stride, whole.apply(pos, box)
+
+
+def most_extended_conformation(aa: AAInput, topo: AATopology, species: int, n_samples: int = 200,
+                               progress=None, should_stop=None) -> tuple[int, int, np.ndarray, float]:
+    """The most extended molecule (largest heavy-atom radius of gyration) among
+    ``n_samples`` evenly spaced frames: (frame, molecule index, coordinates, Rg).
+
+    Stretched conformations are easier to map by eye than coiled ones."""
+    sp = topo.species[species]
+    n = count_frames(aa)
+    stride = max(1, n // max(1, n_samples))
+    heavy = np.array([e != "H" for e in sp.elements]) if any(e != "H" for e in sp.elements) else None
+    best = (-1.0, 0, 0, None)
+    total = (n + stride - 1) // stride
+    for k, (frame, x) in enumerate(_species_frames(aa, topo, sp, stride=stride)):
+        if should_stop and should_stop():
+            raise Cancelled()
+        xs = x[:, heavy] if heavy is not None else x
+        d = xs - xs.mean(axis=1, keepdims=True)
+        rg = np.sqrt((d * d).sum(-1).mean(-1))
+        m = int(np.argmax(rg))
+        if rg[m] > best[0]:
+            best = (float(rg[m]), frame, m, x[m].copy())
+        if progress:
+            progress(k + 1, total)
+    if best[3] is None:
+        raise ValueError("no frames in the trajectory")
+    return best[1], best[2], best[3], best[0]
+
+
+def frame_conformation(aa: AAInput, topo: AATopology, species: int, frame: int, molecule: int) -> np.ndarray:
+    """Whole coordinates of one molecule in one trajectory frame."""
+    sp = topo.species[species]
+    for _f, x in _species_frames(aa, topo, sp, start=frame, stop=frame + 1):
+        return x[molecule]
+    raise ValueError(f"frame {frame} not found")
+
+
 # ======================================================================= evaluation
 class Evaluator:
     """Runs one CG simulation per parameter set and scores it against the AA reference."""
@@ -306,7 +357,7 @@ class FitJob:
             self.on_ref(ref)
         self.log("All-atom reference (mean +- sd):")
         for k, d in ref.items():
-            unit = "A" if d.kind == "bond" else "deg"
+            unit = "deg" if d.kind == "angle" else "A"
             self.log(f"  {k:24s} {d.mean:8.3f} +- {d.std:6.3f} {unit}   ({len(d.samples)} samples)")
 
         p0 = clamp(initial_guess(ref, p.units, p.angle_style, p.optimizer.k_max_bond,
@@ -363,6 +414,10 @@ class FitJob:
     def _on_best(self, out: Path, ref, built: BuiltSystem):
         def cb(r: EvalResult) -> None:
             self.write_bestfit(out / "bestfit", r, ref, built)
+            a, c = ref.get("rg:molecule"), (r.dists or {}).get("rg:molecule")
+            if a is not None and c is not None:
+                self.log(f"  new best {r.score:.4f}: Rg AA {a.mean:.2f} +- {a.std:.2f} A, "
+                         f"CG {c.mean:.2f} +- {c.std:.2f} A")
             if self.on_best:
                 self.on_best(r)
         return cb

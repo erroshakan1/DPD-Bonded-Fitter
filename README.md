@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
+    <img src="docs/logo.svg" alt="Raven Labs" width="220">
+  </picture>
+</p>
+
 # DPD-Bonded-Fitter — bonded DPD / mDPD parameters from all-atom MD
 
 [![tests](https://github.com/erroshakan1/DPD-Bonded-Fitter/actions/workflows/tests.yml/badge.svg)](https://github.com/erroshakan1/DPD-Bonded-Fitter/actions/workflows/tests.yml)
@@ -15,7 +22,9 @@ or many-body DPD (mDPD) models with LAMMPS. Swarm-CG–style optimisation, writt
    molecules are grouped into species. Trajectories may hold `xu yu zu`, `x y z` with or
    without image flags, or scaled coordinates; molecules are made whole along their bonds.
 2. **Mapping.** Click atoms of the species into beads (hydrogens follow their heavy atom),
-   or start from *Auto (chain)*. CG bonds come from the all-atom connectivity (or draw them
+   or start from *Auto (chain)*. For complex molecules switch the all-atom view from the data
+   file to the *most extended* conformation of the trajectory (largest radius of gyration) or
+   to any frame; atom names of GROMACS topologies are shown as labels. CG bonds come from the all-atom connectivity (or draw them
    bead to bead), angles from the bonds. Terms with the same **group** label share one LAMMPS
    type and are fitted together. By default the group follows the bead **names**, and names may
    repeat: name all tail beads of a lipid `C` and every tail bond becomes one `C-C` type and
@@ -36,6 +45,12 @@ or many-body DPD (mDPD) models with LAMMPS. Swarm-CG–style optimisation, writt
      scale, and every PSO step runs the whole swarm in parallel.
    * Score: earth mover's distance of every group divided by the all-atom width (or the
      Swarm-CG–style absolute mix), combined as an RMS.
+   * Effort presets *Quick*, *Standard* and *Thorough* set everything. As in Swarm-CG, each
+     stage stops by itself once the best score improves by less than a tolerance (1 %) for a
+     few steps; the step numbers are only upper limits. *Advanced* exposes the PSO cycles
+     as a table (what to optimise, force-constant range ×, length ±%, angle ±°).
+   * The radius of gyration of the molecule (beads) is shown next to the bond and angle
+     distributions and written to the results; it is reported, and scored only on request.
 
 Output (`<out>/`): `bestfit/params.lmp`, a ready-to-run CG system (`system.data`,
 `pair.lmp`, `in.cg`), `distributions.png`, `history.csv`, `score_history.png`, and one
@@ -82,6 +97,9 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install .
 cgdpd-fit                          # opens the GUI
 ```
+
+On Linux, `cgdpd-fit desktop` adds *DPD Bonded Fitter* with its icon to the application menu
+(and makes the icon appear in the taskbar on Wayland); `cgdpd-fit desktop --remove` undoes it.
 
 The next time, only activate the environment and type `cgdpd-fit`. Without cloning, one
 command installs it into its own environment and puts `cgdpd-fit` on the `PATH`:
@@ -141,6 +159,7 @@ cgdpd-fit                   # GUI
 cgdpd-fit gui project.json  # GUI with a project
 cgdpd-fit run project.json  # headless run of a saved project (--jobs N, --out DIR)
 cgdpd-fit info system.data  # list the molecule species (LAMMPS data file or GROMACS .tpr)
+cgdpd-fit desktop           # application-menu entry and taskbar icon (Linux)
 cgdpd-fit legacy --tpr md.tpr --traj md.xtc --ndx cg_map.ndx \
           --bonds bonds_map.txt --angles angles_map.txt -o project.json   # MD2CG v3 files
 ```

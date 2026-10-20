@@ -173,3 +173,40 @@ def test_equal_bead_names_share_bond_and_angle_groups():
     m.beads[0].name = "N"
     m.follow_names(old)
     assert m.bond_groups[0] == "head" and m.angle_groups[0] == "C-C-N"
+
+
+def test_radius_of_gyration_is_reported_but_not_scored_by_default():
+    from cgdpd_fit.core.distributions import compute_distributions, radius_of_gyration
+    x = np.array([[[[0.0, 0, 0], [2.0, 0, 0]]]])               # 1 frame, 1 molecule, 2 beads
+    assert radius_of_gyration(x) == pytest.approx([1.0])
+    m = CGModel(beads=[Bead("A", "A", [0]), Bead("A", "A", [1])], bonds=[(0, 1)])
+    m.regroup_bonds()
+    ref = compute_distributions(np.repeat(x, 10, axis=0), m)
+    assert "rg:molecule" in ref and "bond:A-A" in ref
+    cg = {k: Dist(d.kind, d.group, d.samples + 0.5) for k, d in ref.items()}
+    _, terms = score(ref, cg)
+    assert "rg:molecule" not in terms
+    _, terms = score(ref, cg, ScoreSettings(include_rg=True))
+    assert "rg:molecule" in terms
+    assert "rg:molecule" not in [k for k in initial_guess(ref, DPDUnits()).keys()]
+
+
+def test_ibi_stops_automatically_when_the_score_levels_off():
+    from cgdpd_fit.core.optimize import EvalResult, OptimizerSettings, Tracker, preset, run_ibi
+    scores = iter([1.0, 0.5, 0.3, 0.299, 0.2985, 0.2984, 0.1, 0.1])
+    calls = []
+
+    def evaluate(plist, stage):
+        calls.append(stage)
+        return [EvalResult(len(calls), plist[0], next(scores), dists={})]
+
+    st = preset("standard")
+    tr = Tracker()
+    run_ibi(BondedParams({"b": (10.0, 1.0)}), evaluate, lambda p, d: p, st, tr, log=lambda *_: None)
+    assert len(calls) == 5            # 0.3 -> 0.299 -> 0.2985: two steps below 1 %, stop
+    st.auto_stop = False
+    calls.clear()
+    scores = iter([1.0] * 20)
+    run_ibi(BondedParams({"b": (10.0, 1.0)}), evaluate, lambda p, d: p, st, Tracker(), log=lambda *_: None)
+    assert len(calls) == st.ibi_iterations + 1
+    assert OptimizerSettings.from_dict(st.to_dict()).tolerance == st.tolerance

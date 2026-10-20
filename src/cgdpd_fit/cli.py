@@ -5,6 +5,7 @@
     cgdpd-fit run project.json         run a saved project without the GUI
     cgdpd-fit info system.data|md.tpr  list the molecule species of an all-atom system
     cgdpd-fit legacy ...               build a project from MD2CG v3 files (ndx + bonds/angles maps)
+    cgdpd-fit desktop                  add cgdpd-fit with its icon to the application menu (Linux)
 """
 from __future__ import annotations
 
@@ -36,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("--angles", help="angles_map.txt")
     lg.add_argument("--rc", type=float, default=6.46, help="DPD length unit in Angstrom")
     lg.add_argument("-o", "--output", default="project.json")
+    dk = sub.add_parser("desktop", help="add cgdpd-fit with its icon to the application menu (Linux)")
+    dk.add_argument("--remove", action="store_true", help="remove the menu entry and icon again")
     args = ap.parse_args(argv)
 
     if args.cmd in (None, "gui"):
@@ -55,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
 
         res = FitJob(p, log=lambda s: print(s, flush=True), progress=progress).run()
         return 0 if res.best is not None else 1
+    if args.cmd == "desktop":
+        return install_desktop_entry(remove=args.remove)
     if args.cmd == "info":
         from .core.fit import AAInput, load_topology
         if args.data.endswith(".tpr"):
@@ -89,6 +94,42 @@ def main(argv: list[str] | None = None) -> int:
             print("  warning:", m)
         return 0
     return 1
+
+
+def install_desktop_entry(remove: bool = False) -> int:
+    """Write ~/.local/share/applications/cgdpd-fit.desktop and the icon (freedesktop.org).
+
+    Wayland compositors show a window's icon only through such an entry, matched by the
+    application id that the GUI sets (``cgdpd-fit``)."""
+    import os
+    import shutil
+    import subprocess
+    if not sys.platform.startswith("linux"):
+        print("cgdpd-fit desktop: only needed on Linux; Windows and macOS use the window icon")
+        return 0
+    data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    desktop = data / "applications" / "cgdpd-fit.desktop"
+    icon = data / "icons/hicolor/512x512/apps/cgdpd-fit.png"
+    if remove:
+        for f in (desktop, icon):
+            f.unlink(missing_ok=True)
+        print(f"removed {desktop} and {icon}")
+        return 0
+    exe = shutil.which("cgdpd-fit") or str(Path(sys.argv[0]).resolve())
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(Path(__file__).parent / "gui" / "icon.png", icon)
+    desktop.write_text(
+        "[Desktop Entry]\nType=Application\nName=DPD Bonded Fitter\n"
+        "Comment=Bonded DPD / mDPD parameters from all-atom MD\n"
+        f"Exec={exe} gui %f\nIcon=cgdpd-fit\nTerminal=false\n"
+        "Categories=Science;Chemistry;Physics;\nStartupWMClass=cgdpd-fit\n")
+    for cmd in (["update-desktop-database", str(desktop.parent)],
+                ["gtk-update-icon-cache", "-q", "-t", str(data / "icons/hicolor")]):
+        if shutil.which(cmd[0]):
+            subprocess.run(cmd, capture_output=True)
+    print(f"wrote {desktop}\n      {icon}\n(Exec = {exe})")
+    return 0
 
 
 def entry() -> int:

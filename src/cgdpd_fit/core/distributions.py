@@ -19,7 +19,7 @@ BOND_BINS = 120
 
 @dataclass
 class Dist:
-    kind: str              # "bond" or "angle"
+    kind: str              # "bond", "angle" or "rg" (radius of gyration of the beads)
     group: str
     samples: np.ndarray    # Angstrom or degrees
     n_terms: int = 1       # bonds/angles per molecule in this group
@@ -69,8 +69,17 @@ def angles_deg(x: np.ndarray, triples) -> np.ndarray:
     return np.degrees(np.arccos(np.clip(c, -1.0, 1.0))).ravel()
 
 
+def radius_of_gyration(x: np.ndarray) -> np.ndarray:
+    """Rg of every molecule and frame from bead positions (all beads weighted equally, as
+    the DPD beads have equal masses); x: (..., n_beads, 3)."""
+    d = x - x.mean(axis=-2, keepdims=True)
+    return np.sqrt(np.mean(np.sum(d * d, axis=-1), axis=-1)).ravel()
+
+
 def compute_distributions(x: np.ndarray, model: CGModel) -> dict[str, Dist]:
-    """Distributions of every bond and angle group of ``model`` for bead coordinates ``x``.
+    """Distributions of every bond and angle group of ``model`` for bead coordinates ``x``,
+    plus the radius of gyration of the molecule (key ``rg:molecule``, reported, scored only
+    on request).
 
     ``x`` has shape (n_frames, n_molecules, n_beads, 3).
     """
@@ -82,6 +91,9 @@ def compute_distributions(x: np.ndarray, model: CGModel) -> dict[str, Dist]:
     for g in model.angle_group_names():
         tr = model.angles_in(g)
         d = Dist("angle", g, angles_deg(x, tr).astype(float), len(tr))
+        out[d.key] = d
+    if model.n_beads > 1:
+        d = Dist("rg", "molecule", radius_of_gyration(x).astype(float), 1)
         out[d.key] = d
     return out
 
@@ -95,7 +107,7 @@ def emd(a: Dist, b: Dist) -> float:
 
 # floors for the normalisation, so that extremely narrow reference distributions do not
 # dominate the score
-_STD_FLOOR = {"bond": 0.02, "angle": 1.0}
+_STD_FLOOR = {"bond": 0.02, "angle": 1.0, "rg": 0.02}
 
 
 @dataclass
@@ -103,13 +115,16 @@ class ScoreSettings:
     mode: str = "normalized"     # "normalized": EMD / sigma_AA ; "absolute": Swarm-CG like
     bond_scale: float = 10.0     # absolute mode: degrees per Angstrom of bond EMD
     weights: dict | None = None  # key -> weight (default 1)
+    include_rg: bool = False     # also score the radius of gyration (Swarm-CG only reports it)
 
     def to_dict(self) -> dict:
-        return {"mode": self.mode, "bond_scale": self.bond_scale, "weights": self.weights or {}}
+        return {"mode": self.mode, "bond_scale": self.bond_scale, "weights": self.weights or {},
+                "include_rg": self.include_rg}
 
     @classmethod
     def from_dict(cls, d: dict) -> "ScoreSettings":
-        return cls(d.get("mode", "normalized"), float(d.get("bond_scale", 10.0)), d.get("weights") or None)
+        return cls(d.get("mode", "normalized"), float(d.get("bond_scale", 10.0)), d.get("weights") or None,
+                   bool(d.get("include_rg", False)))
 
 
 def score(ref: dict[str, Dist], cg: dict[str, Dist], st: ScoreSettings | None = None,
@@ -123,7 +138,8 @@ def score(ref: dict[str, Dist], cg: dict[str, Dist], st: ScoreSettings | None = 
     The total is the weighted root-mean-square of the terms.
     """
     st = st or ScoreSettings()
-    keys = list(ref) if keys is None else list(keys)
+    if keys is None:
+        keys = [k for k, d in ref.items() if d.kind != "rg" or st.include_rg]
     terms: dict[str, float] = {}
     num = den = 0.0
     for k in keys:
@@ -131,7 +147,7 @@ def score(ref: dict[str, Dist], cg: dict[str, Dist], st: ScoreSettings | None = 
         c = cg.get(k)
         e = emd(r, c) if c is not None else float("inf")
         if st.mode == "absolute":
-            t = e * st.bond_scale if r.kind == "bond" else e
+            t = e * st.bond_scale if r.kind in ("bond", "rg") else e
         else:
             t = e / max(r.std, _STD_FLOOR[r.kind])
         terms[k] = t

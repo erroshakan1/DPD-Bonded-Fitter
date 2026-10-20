@@ -78,7 +78,7 @@ def initial_guess(ref: dict[str, Dist], units: DPDUnits, angle_style: str = "har
             r = units.to_dpd(d.samples)
             var = max(float(np.var(r)), 1e-8)
             p.bonds[d.group] = (min(kT / (2.0 * var), k_max_bond), float(np.mean(r)))
-        else:
+        elif d.kind == "angle":
             th = np.radians(d.samples)
             if angle_style == "cosine/squared":
                 c = np.cos(th)
@@ -109,7 +109,7 @@ def ibi_update(p: BondedParams, ref: dict[str, Dist], cg: dict[str, Dist], units
             K = K * ratio ** alpha
             r0 = r0 + alpha * units.to_dpd(d.mean - c.mean)
             q.bonds[d.group] = (float(K), float(max(r0, 0.01)))
-        else:
+        elif d.kind == "angle":
             K, th0 = p.angles[d.group]
             if p.angle_style == "cosine/squared":
                 va, vc = np.var(np.cos(np.radians(d.samples))), np.var(np.cos(np.radians(c.samples)))

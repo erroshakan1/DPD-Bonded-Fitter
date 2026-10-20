@@ -33,7 +33,7 @@ def draw_distributions(fig, ref: dict[str, Dist], cg: dict[str, Dist], title: st
         r = ref[k]
         c = cg.get(k)
         edges = common_edges([r] + ([c] if c is not None else []), r.kind,
-                             bond_bin if r.kind == "bond" else angle_bin)
+                             angle_bin if r.kind == "angle" else bond_bin)
         x = 0.5 * (edges[1:] + edges[:-1])
         w = np.diff(edges)
         series = [(r, AA_COLOR, f"AA-mapped (n={len(r.samples)})")]
@@ -45,17 +45,18 @@ def draw_distributions(fig, ref: dict[str, Dist], cg: dict[str, Dist], title: st
             ax.fill_between(x, y, color=color, alpha=0.25, lw=0)
             ax.plot(d.mean, 0, marker="D", color=color, ms=5, clip_on=False, zorder=5)
         ax.set_ylim(bottom=0)
-        label = f"{r.group}"
+        label = "Rg (molecule)" if r.kind == "rg" else f"{r.group}"
         if terms and k in terms:
             label += f"   ({terms[k]:.2f})"
         ax.set_title(label, fontsize=9)
-        ax.set_xlabel("distance (Å)" if r.kind == "bond" else "angle (°)", fontsize=8)
+        ax.set_xlabel({"bond": "distance (Å)", "angle": "angle (°)", "rg": "radius of gyration (Å)"}[r.kind],
+                      fontsize=8)
         ax.tick_params(labelsize=7)
         ax.set_yticks([])
         if r.kind == "angle":
             lo = max(0.0, min(r.mean - 4 * r.std, (c.mean - 4 * c.std) if c is not None and len(c.samples) else 180))
             ax.set_xlim(lo, 180)
-    axes.ravel()[0].legend(fontsize=7, frameon=False)
+    axes.ravel()[0].legend(fontsize=7, frameon=False, loc="upper left")
     if title:
         fig.suptitle(title, fontsize=10)
     fig.tight_layout()

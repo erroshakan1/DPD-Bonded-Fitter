@@ -21,10 +21,11 @@ from .. import __version__
 from ..core.cgbuild import STYLES, CGSystemSettings
 from ..core.distributions import ScoreSettings, compute_distributions
 from ..core.flory import bead_molar_volume
-from ..core.fit import AAInput, FitJob, Project, count_frames, load_topology, map_aa
+from ..core.fit import (AAInput, FitJob, Project, count_frames, frame_conformation, load_topology, map_aa,
+                        most_extended_conformation)
 from ..core.mapping import FrameSelection, reference_beads
 from ..core.model import CENTER_LABELS, CENTERS, Bead, CGModel, auto_chain_model
-from ..core.optimize import OptimizerSettings
+from ..core.optimize import CYCLE_WHAT, PRESET_HELP, CycleSpec, OptimizerSettings, preset
 from ..core.params import ANGLE_STYLES, initial_guess
 from ..core.runner import Cancelled, RunSettings, find_lammps
 from ..core.units import DPDUnits, rc_from_mapping
@@ -222,10 +223,17 @@ class MainWindow(QMainWindow):
         self.chk_sel_new = QCheckBox("Selection → new bead")
         self.chk_sel_new.setToolTip("Every Shift+drag selection in the all-atom view becomes a new bead")
         self.spn_instance = _ispin(1, 1, 1, prefix="molecule ")
+        self.cmb_conf = QComboBox()
+        self.cmb_conf.addItems(["Data file", "Most extended (trajectory)", "Trajectory frame"])
+        self.cmb_conf.setToolTip("Conformation shown for mapping. A stretched molecule is easier to map:\n"
+                                 "'Most extended' scans the trajectory for the largest radius of gyration.")
+        self.spn_frame = _ispin(0, 0, 0, prefix="frame ")
+        self.spn_frame.setVisible(False)
+        self.spn_frame.setKeyboardTracking(False)
         aa_panel = QWidget()
         la = QVBoxLayout(aa_panel)
-        la.addWidget(_hline(QLabel("<b>All-atom</b>"), 1, self.chk_sel_new, self.chk_h, self.chk_aa_labels,
-                            self.cmb_color, self.spn_instance))
+        la.addWidget(_hline(QLabel("<b>All-atom</b>"), 1, self.cmb_conf, self.spn_frame, self.spn_instance))
+        la.addWidget(_hline(self.chk_sel_new, 1, self.chk_h, self.chk_aa_labels, self.cmb_color))
         la.addWidget(self.aa_view, 1)
         cg_panel = QWidget()
         lc = QVBoxLayout(cg_panel)
@@ -454,30 +462,90 @@ class MainWindow(QMainWindow):
         L.addWidget(g4)
 
         g5 = self._section("5  Optimiser", collapsed=True)
-        f5 = QFormLayout(g5.content)
+        v5 = QVBoxLayout(g5.content)
+        f5 = QFormLayout()
+        self.cmb_effort = QComboBox()
+        for key, label in (("quick", "Quick"), ("standard", "Standard (recommended)"),
+                           ("thorough", "Thorough"), ("custom", "Custom")):
+            self.cmb_effort.addItem(label, key)
+        self.cmb_effort.setCurrentIndex(1)
+        f5.addRow("Effort", self.cmb_effort)
+        self.lbl_effort = QLabel("")
+        self.lbl_effort.setWordWrap(True)
+        self.lbl_effort.setStyleSheet("color: palette(placeholder-text)")
+        f5.addRow(self.lbl_effort)
+        self.chk_auto_stop = QCheckBox("Stop each stage automatically when the score")
+        self.chk_auto_stop.setChecked(True)
+        self.chk_auto_stop.setToolTip("As in Swarm-CG: a stage ends when the best score no longer improves\n"
+                                      "by more than this fraction for 'patience' steps.")
+        self.spn_tol = _dspin(0.05, 50.0, 1.0, 2, 0.5, " %")
+        f5.addRow(self.chk_auto_stop)
+        f5.addRow("  improves less than", self.spn_tol)
+        v5.addLayout(f5)
+
+        adv = CollapsibleGroup("Advanced", collapsed=True)
+        fa = QFormLayout(adv.content)
         self.cmb_method = QComboBox()
-        self.cmb_method.addItems(["ibi+pso", "ibi", "pso"])
-        self.cmb_method.setToolTip("ibi: moment matching only; pso: Swarm-CG PSO cycles; ibi+pso: both")
-        f5.addRow("Method", self.cmb_method)
-        self.spn_ibi = _ispin(0, 100, 6)
+        for key, label in (("ibi+pso", "moment matching, then PSO"), ("ibi", "moment matching only"),
+                           ("pso", "PSO only")):
+            self.cmb_method.addItem(label, key)
+        self.cmb_method.setToolTip("Moment matching (iterative Boltzmann inversion of mean and width) is cheap and\n"
+                                   "removes most of the error of the first guess; the particle swarm (PSO,\n"
+                                   "as in Swarm-CG) then searches around it.")
+        fa.addRow("Method", self.cmb_method)
+        self.spn_ibi = _ispin(0, 200, 10)
+        self.spn_ibi.setToolTip("Upper limit of moment-matching iterations (one simulation each)")
+        fa.addRow("Moment-matching steps (max)", self.spn_ibi)
         self.spn_alpha = _dspin(0.05, 1.5, 0.7, 2, 0.05)
-        f5.addRow("IBI iterations", _hline(self.spn_ibi, QLabel("α"), self.spn_alpha))
+        self.spn_alpha.setToolTip("Fraction of the correction applied per step: 1 = full step,\n"
+                                  "smaller = slower but more stable (0.5-0.8 is usual)")
+        fa.addRow("Step size α", self.spn_alpha)
+        self.tbl_cycles = QTableWidget(0, 4)
+        self.tbl_cycles.setHorizontalHeaderLabels(["Optimise", "K range ×", "Length ±%", "Angle ±°"])
+        self.tbl_cycles.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_cycles.verticalHeader().setVisible(True)
+        self.tbl_cycles.setToolTip(
+            "PSO cycles, run one after the other around the best result so far (Swarm-CG strategy).\n"
+            "K range ×3: force constants searched between K/3 and 3K.\n"
+            "Length ±20%: equilibrium bond lengths r0 within ±20 %.\n"
+            "Angle ±20°: equilibrium angles θ0 within ±20 degrees.")
+        self.tbl_cycles.setMinimumHeight(120)
+        fa.addRow(self.tbl_cycles)
+        b_addc = QPushButton("Add cycle")
+        b_addc.clicked.connect(lambda: self._add_cycle_row(CycleSpec("all", 1.4, 0.06, 5.0)))
+        b_delc = QPushButton("Remove cycle")
+        b_delc.clicked.connect(self._remove_cycle_row)
+        fa.addRow(_hline(b_addc, b_delc, 1))
         self.spn_swarm = _ispin(0, 500, 0)
         self.spn_swarm.setSpecialValueText("auto")
+        self.spn_swarm.setToolTip("Parameter sets tried per PSO step (auto: 10 + 2√D, rounded up to the parallel runs)")
         self.spn_steps = _ispin(0, 500, 0)
         self.spn_steps.setSpecialValueText("auto")
+        self.spn_steps.setToolTip("Upper limit of PSO steps per cycle (auto: 8 + √D)")
+        fa.addRow("Swarm size", self.spn_swarm)
+        fa.addRow("PSO steps per cycle (max)", self.spn_steps)
         self.spn_patience = _ispin(1, 100, 4)
-        f5.addRow("PSO swarm", _hline(self.spn_swarm, QLabel("steps"), self.spn_steps))
-        f5.addRow("Patience", self.spn_patience)
-        self.ed_cycles = QLineEdit("all 3 0.2 20; angles 2 0.1 10; all 1.4 0.06 5")
-        self.ed_cycles.setToolTip("PSO cycles separated by ';' : what K-factor r0-fraction theta-range(deg)\n"
-                                  "what = all | bonds | angles")
-        f5.addRow("Cycles", self.ed_cycles)
+        self.spn_patience.setToolTip("Steps without improvement before a stage stops (automatic stop)")
+        fa.addRow("Patience", self.spn_patience)
         self.cmb_score = QComboBox()
         self.cmb_score.addItems(["normalized (EMD / σ_AA)", "absolute (Swarm-CG)"])
+        self.cmb_score.setToolTip("normalized: mismatch of every bond/angle in units of the width of its\n"
+                                  "all-atom distribution; absolute: Å and degrees mixed with a fixed factor")
         self.spn_bscale = _dspin(0.1, 1000, 10.0, 1, suffix=" °/Å")
-        f5.addRow("Score", _hline(self.cmb_score, self.spn_bscale))
+        fa.addRow("Score", _hline(self.cmb_score, self.spn_bscale))
+        self.chk_score_rg = QCheckBox("Include the radius of gyration in the score")
+        self.chk_score_rg.setToolTip("Off (as in Swarm-CG): Rg is only reported in the plots and results")
+        fa.addRow(self.chk_score_rg)
+        v5.addWidget(adv)
         L.addWidget(g5)
+        self._applying_preset = False
+        self.cmb_effort.currentIndexChanged.connect(self.on_effort_changed)
+        for w in (self.spn_ibi, self.spn_alpha, self.spn_swarm, self.spn_steps, self.spn_patience, self.spn_tol):
+            w.valueChanged.connect(self._custom_effort)
+        self.cmb_method.currentIndexChanged.connect(self._custom_effort)
+        self.chk_auto_stop.toggled.connect(self._custom_effort)
+        self.tbl_cycles.itemChanged.connect(self._custom_effort)
+        self.on_effort_changed()
 
         g6 = self._section("6  LAMMPS and output")
         f6 = QFormLayout(g6.content)
@@ -541,7 +609,10 @@ class MainWindow(QMainWindow):
         for w in (self.chk_h, self.chk_aa_labels, self.chk_cg_labels, self.chk_skeleton):
             w.toggled.connect(lambda _on: self.refresh_views(False))
         self.cmb_color.currentIndexChanged.connect(lambda _i: self.refresh_views(False))
-        self.spn_instance.valueChanged.connect(lambda _v: self.refresh_views(False))
+        self.spn_instance.valueChanged.connect(lambda _v: self.on_conformation_changed())
+        self.cmb_conf.currentIndexChanged.connect(lambda _i: self.on_conformation_changed())
+        self.spn_frame.valueChanged.connect(lambda _v: self.on_conformation_changed())
+        self._display = None        # (species, coordinates, info) shown instead of the data file
         self.btn_draw.toggled.connect(self._draw_toggled)
         self._syncing = False
         self.aa_view.viewChanged.connect(lambda: self._sync_camera(self.aa_view, self.cg_view))
@@ -706,6 +777,7 @@ class MainWindow(QMainWindow):
                 info += f", {n} frames"
                 self.spn_start.setMaximum(max(0, n - 1))
                 self.spn_stop.setMaximum(n)
+                self.spn_frame.setMaximum(max(0, n - 1))
         except Exception as exc:  # noqa: BLE001
             info += f"\ntrajectory: {exc}"
         self.lbl_aa_info.setText(info)
@@ -741,10 +813,50 @@ class MainWindow(QMainWindow):
         self.cmb_center.setCurrentIndex(CENTERS.index(self.model.center))
         self.cmb_center.blockSignals(False)
         self.active_bead = 0
+        self._display = None
+        self.cmb_conf.blockSignals(True)
+        self.cmb_conf.setCurrentIndex(0)
+        self.cmb_conf.blockSignals(False)
+        self.spn_frame.setVisible(False)
         self.invalidate_reference()
         self.refresh_all(reset=True)
 
-    # ============================================================= mapping
+    # ======================================================= conformation
+    def on_conformation_changed(self):
+        mode = self.cmb_conf.currentIndex()
+        self.spn_frame.setVisible(mode == 2)
+        self.spn_instance.setEnabled(mode != 1)
+        if self.species is None:
+            return
+        if mode == 0:
+            self._display = None
+            self.refresh_views(True)
+            return
+        if self._busy():
+            return
+        aa, topo, si = self.aa_input(), self.topo, self.cur
+        if not (aa.traj if aa.format == "gromacs" else aa.dump):
+            self.error("Conformation", "Select a trajectory first.")
+            return
+        if mode == 1:
+            def task(w: Worker):
+                f, mol, x, rg = most_extended_conformation(
+                    aa, topo, si, progress=lambda i, n: w.progress.emit("scanning", i, n),
+                    should_stop=lambda: w.stop_requested)
+                return si, x, f"most extended: frame {f}, molecule {mol + 1}, Rg {rg:.1f} Å"
+        else:
+            frame, mol = self.spn_frame.value(), self.spn_instance.value() - 1
+
+            def task(w: Worker):
+                x = frame_conformation(aa, topo, si, frame, mol)
+                return si, x, f"frame {frame}, molecule {mol + 1}"
+
+        def done(val):
+            self._display = val
+            self.refresh_views(True)
+
+        self._start(task, done, "Conformation")
+
     def _edit(self, fn, mapping_changed: bool = False):
         if self.model is None:
             return
@@ -1070,10 +1182,20 @@ class MainWindow(QMainWindow):
             self.cg_view.clear("Define beads for the selected species")
             return
         inst = min(self.spn_instance.value() - 1, sp.count - 1)
-        x, beads = reference_beads(self.topo, sp, m or CGModel(), inst)
+        if self._display is not None and self._display[0] == self.cur:
+            x = self._display[1]
+            beads = (m or CGModel()).weights(sp, self.topo.masses[sp.instances[0]]) @ x
+            self.aa_view.set_info(self._display[2])
+        else:
+            x, beads = reference_beads(self.topo, sp, m or CGModel(), inst)
+            self.aa_view.set_info("")
         self._aa_atoms = x
         radii = np.array([0.28 if e == "H" else 0.5 for e in sp.elements])
-        labels = [f"{a + 1}{e}" for a, e in enumerate(sp.elements)]
+        rows = sp.instances[inst]
+        if self.topo.names:
+            labels = [f"{a + 1} {self.topo.names[r]}" for a, r in enumerate(rows)]
+        else:
+            labels = [f"{a + 1}{e}" for a, e in enumerate(sp.elements)]
         self.aa_view.set_molecule(x, radii, self._aa_colors(), sp.bonds, labels, reset_view=reset)
         vis = np.array([self.chk_h.isChecked() or e != "H" for e in sp.elements])
         self.aa_view.set_visible(vis)
@@ -1158,15 +1280,17 @@ class MainWindow(QMainWindow):
         p.cg = c
         p.angle_style = self.cmb_angle_style.currentText()
         p.scoring = ScoreSettings("normalized" if self.cmb_score.currentIndex() == 0 else "absolute",
-                                  self.spn_bscale.value())
+                                  self.spn_bscale.value(), include_rg=self.chk_score_rg.isChecked())
         o = OptimizerSettings()
-        o.method = self.cmb_method.currentText()
+        o.method = self.cmb_method.currentData()
+        o.auto_stop = self.chk_auto_stop.isChecked()
+        o.tolerance = self.spn_tol.value() / 100.0
         o.ibi_iterations = self.spn_ibi.value()
         o.ibi_alpha = self.spn_alpha.value()
         o.swarm_size = self.spn_swarm.value()
         o.max_steps = self.spn_steps.value()
         o.patience = self.spn_patience.value()
-        o.cycles = self._parse_cycles(o.cycles)
+        o.cycles = self._cycles_from_table(o.cycles)
         p.optimizer = o
         p.run = RunSettings(lammps_exe=self.ed_lmp.text().strip(), extra_args=self.ed_extra.text().strip(),
                             n_jobs=self.spn_jobs.value(), threads=self.spn_threads.value(),
@@ -1176,21 +1300,83 @@ class MainWindow(QMainWindow):
         p.angle_bin = self.spn_angle_bin.value()
         return p
 
-    def _parse_cycles(self, default):
-        from ..core.optimize import CycleSpec
+    # ------------------------------------------------------ optimiser widgets
+    def _cycle_combo(self, what: str) -> QComboBox:
+        c = QComboBox()
+        for key, label in CYCLE_WHAT.items():
+            c.addItem(label, key)
+        c.setCurrentIndex(max(0, c.findData(what)))
+        c.currentIndexChanged.connect(self._custom_effort)
+        return c
+
+    def _add_cycle_row(self, cy: CycleSpec):
+        t = self.tbl_cycles
+        t.blockSignals(True)
+        r = t.rowCount()
+        t.insertRow(r)
+        t.setCellWidget(r, 0, self._cycle_combo(cy.what))
+        for c, v in ((1, f"{cy.k_factor:g}"), (2, f"{100 * cy.r0_frac:g}"), (3, f"{cy.theta_deg:g}")):
+            t.setItem(r, c, QTableWidgetItem(v))
+        t.blockSignals(False)
+        self._custom_effort()
+
+    def _remove_cycle_row(self):
+        rows = sorted({i.row() for i in self.tbl_cycles.selectedIndexes()} or {self.tbl_cycles.rowCount() - 1},
+                      reverse=True)
+        for r in rows:
+            if r >= 0:
+                self.tbl_cycles.removeRow(r)
+        self._custom_effort()
+
+    def _set_cycles(self, cycles):
+        self.tbl_cycles.setRowCount(0)
+        for cy in cycles:
+            self._add_cycle_row(cy)
+
+    def _cycles_from_table(self, default):
         out = []
+        t = self.tbl_cycles
         try:
-            for part in self.ed_cycles.text().split(";"):
-                t = part.split()
-                if not t:
-                    continue
-                if t[0] not in ("all", "bonds", "angles"):
-                    raise ValueError(t[0])
-                out.append(CycleSpec(t[0], float(t[1]), float(t[2]), float(t[3])))
-        except (ValueError, IndexError):
-            self.log("warning: could not parse the PSO cycles, using the defaults")
+            for r in range(t.rowCount()):
+                what = t.cellWidget(r, 0).currentData()
+                k, l, a = (float(t.item(r, c).text()) for c in (1, 2, 3))
+                if k < 1 or l < 0 or a < 0:
+                    raise ValueError
+                out.append(CycleSpec(what, k, l / 100.0, a))
+        except (ValueError, AttributeError):
+            self.log("warning: a PSO cycle row is not valid (K range >= 1, ranges >= 0); using the defaults")
             return default
-        return out or default
+        return out
+
+    def on_effort_changed(self, *_):
+        key = self.cmb_effort.currentData()
+        if key == "custom":
+            self.lbl_effort.setText("your own settings (see Advanced)")
+            return
+        self.lbl_effort.setText(PRESET_HELP[key])
+        o = preset(key)
+        self._applying_preset = True
+        try:
+            self.cmb_method.setCurrentIndex(max(0, self.cmb_method.findData(o.method)))
+            self.spn_ibi.setValue(o.ibi_iterations)
+            self.spn_alpha.setValue(o.ibi_alpha)
+            self.spn_swarm.setValue(o.swarm_size)
+            self.spn_steps.setValue(o.max_steps)
+            self.spn_patience.setValue(o.patience)
+            self.chk_auto_stop.setChecked(o.auto_stop)
+            self.spn_tol.setValue(100 * o.tolerance)
+            self._set_cycles(o.cycles)
+        finally:
+            self._applying_preset = False
+
+    def _custom_effort(self, *_):
+        if getattr(self, "_applying_preset", True) or not hasattr(self, "cmb_effort"):
+            return
+        if self.cmb_effort.currentData() != "custom":
+            self.cmb_effort.blockSignals(True)
+            self.cmb_effort.setCurrentIndex(self.cmb_effort.findData("custom"))
+            self.cmb_effort.blockSignals(False)
+            self.lbl_effort.setText("your own settings (see Advanced)")
 
     def _start(self, fn, on_done, label: str):
         # The worker lives in another thread: connect its signals to bound methods of this
@@ -1495,14 +1681,24 @@ class MainWindow(QMainWindow):
         self.cmb_score.setCurrentIndex(0 if p.scoring.mode == "normalized" else 1)
         self.spn_bscale.setValue(p.scoring.bond_scale)
         o = p.optimizer
-        self.cmb_method.setCurrentText(o.method)
-        self.spn_ibi.setValue(o.ibi_iterations)
-        self.spn_alpha.setValue(o.ibi_alpha)
-        self.spn_swarm.setValue(o.swarm_size)
-        self.spn_steps.setValue(o.max_steps)
-        self.spn_patience.setValue(o.patience)
-        self.ed_cycles.setText("; ".join(f"{cy.what} {cy.k_factor:g} {cy.r0_frac:g} {cy.theta_deg:g}"
-                                         for cy in o.cycles))
+        self.cmb_effort.blockSignals(True)
+        self.cmb_effort.setCurrentIndex(self.cmb_effort.findData("custom"))
+        self.cmb_effort.blockSignals(False)
+        self._applying_preset = True
+        try:
+            self.cmb_method.setCurrentIndex(max(0, self.cmb_method.findData(o.method)))
+            self.spn_ibi.setValue(o.ibi_iterations)
+            self.spn_alpha.setValue(o.ibi_alpha)
+            self.spn_swarm.setValue(o.swarm_size)
+            self.spn_steps.setValue(o.max_steps)
+            self.spn_patience.setValue(o.patience)
+            self.chk_auto_stop.setChecked(o.auto_stop)
+            self.spn_tol.setValue(100 * o.tolerance)
+            self._set_cycles(o.cycles)
+        finally:
+            self._applying_preset = False
+        self.lbl_effort.setText("settings of the project (see Advanced)")
+        self.chk_score_rg.setChecked(p.scoring.include_rg)
         r = p.run
         self.ed_lmp.setText(r.lammps_exe)
         self.ed_extra.setText(r.extra_args)

@@ -34,5 +34,8 @@ cgdpd-fit = "cgdpd_fit.cli:entry"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+cgdpd_fit = ["gui/*.png"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
