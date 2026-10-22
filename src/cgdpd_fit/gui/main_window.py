@@ -27,7 +27,7 @@ from ..core.mapping import FrameSelection, reference_beads
 from ..core.model import CENTER_LABELS, CENTERS, Bead, CGModel, auto_chain_model
 from ..core.optimize import CYCLE_WHAT, PRESET_HELP, CycleSpec, OptimizerSettings, preset
 from ..core.params import ANGLE_STYLES, initial_guess
-from ..core.runner import Cancelled, RunSettings, find_lammps
+from ..core.runner import Cancelled, RunSettings, find_lammps, missing_packages, package_hint
 from ..core.units import DPDUnits, rc_from_mapping
 from ..plots import draw_distributions, draw_history
 from .mol_view import MoleculeView
@@ -174,8 +174,12 @@ class MainWindow(QMainWindow):
     def _file_row(self, edit: QLineEdit, slot) -> QWidget:
         b = QToolButton()
         b.setText("...")
+        b.setToolTip("Browse")
         b.clicked.connect(slot)
-        return _hline(edit, b)
+        edit.setMinimumWidth(40)      # the field shrinks with the panel, the button stays visible
+        w = _hline(edit, b)
+        w.layout().setStretch(0, 1)
+        return w
 
     def _build_ui(self):
         # ------------------------------------------------ central: tabs
@@ -213,7 +217,7 @@ class MainWindow(QMainWindow):
         self.btn_clearb.setToolTip("Remove all atoms from the selected bead")
         self.btn_clearb.clicked.connect(self.clear_bead)
         self.btn_rename = QToolButton()
-        self.btn_rename.setText("Rename")
+        self.btn_rename.setText("Rename (F2)")
         self.btn_rename.setToolTip("Name and type of the selected bead (F2, or double-click the bead)")
         self.btn_rename.clicked.connect(lambda: self.rename_bead(self.active_bead))
         self.chk_auto_bonds = QCheckBox("Auto bonds")
@@ -241,10 +245,11 @@ class MainWindow(QMainWindow):
         lc.addWidget(_hline(self.btn_new, self.btn_delb, self.btn_rename, self.btn_clearb, self.btn_draw,
                             self.chk_auto_bonds, 1))
         hint = QLabel("<i>+ Bead</i>, then click atoms on the left (Shift+drag selects a group). "
-                      "Click a bead here to continue with it; keys 1-9 select beads.")
+                      "Click a bead here to continue with it; keys 1-9 select beads. "
+                      "<b>Rename</b> a bead: double-click it, or click it and press <b>F2</b>.")
         hint.setWordWrap(True)
         hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        hint.setStyleSheet("color: palette(placeholder-text)")
+        hint.setObjectName("hint")
         lc.addWidget(hint)
         lc.addWidget(self.cg_view, 3)
         self.topo_tabs = QTabWidget()
@@ -341,8 +346,8 @@ class MainWindow(QMainWindow):
         self.spn_stop = _ispin(0, 10**8, 0)
         self.spn_stop.setSpecialValueText("end")
         self.spn_stride = _ispin(1, 10**6, 1)
-        f1.addRow("Frames", _hline(QLabel("from"), self.spn_start, QLabel("to"), self.spn_stop,
-                                   QLabel("every"), self.spn_stride))
+        f1.addRow("Frames", _hline(QLabel("from"), self.spn_start, QLabel("to"), self.spn_stop))
+        f1.addRow("", _hline(QLabel("every"), self.spn_stride, 1))
         self.spn_maxmol = _ispin(0, 10**7, 0)
         self.spn_maxmol.setSpecialValueText("all")
         self.spn_maxmol.setToolTip("Use only a random subset of the molecules (0 = all)")
@@ -365,7 +370,9 @@ class MainWindow(QMainWindow):
         self.tbl_beads.itemChanged.connect(self.on_bead_edited)
         self.topo_tabs.insertTab(0, self.tbl_beads, "Beads")
         self.topo_tabs.setCurrentIndex(0)
-        v2.addWidget(QLabel("Draw beads in the CG panel of the <i>Mapping</i> tab, or:"))
+        lbl_draw = QLabel("Draw beads in the CG panel of the <i>Mapping</i> tab, or:")
+        lbl_draw.setWordWrap(True)
+        v2.addWidget(lbl_draw)
         self.spn_auto = _ispin(1, 200, 3, suffix=" beads")
         b_auto = QPushButton("Auto (chain)")
         b_auto.setToolTip("Split the longest heavy-atom chain into consecutive beads")
@@ -472,9 +479,9 @@ class MainWindow(QMainWindow):
         f5.addRow("Effort", self.cmb_effort)
         self.lbl_effort = QLabel("")
         self.lbl_effort.setWordWrap(True)
-        self.lbl_effort.setStyleSheet("color: palette(placeholder-text)")
+        self.lbl_effort.setObjectName("hint")
         f5.addRow(self.lbl_effort)
-        self.chk_auto_stop = QCheckBox("Stop each stage automatically when the score")
+        self.chk_auto_stop = QCheckBox("Auto-stop when the score")
         self.chk_auto_stop.setChecked(True)
         self.chk_auto_stop.setToolTip("As in Swarm-CG: a stage ends when the best score no longer improves\n"
                                       "by more than this fraction for 'patience' steps.")
@@ -568,12 +575,14 @@ class MainWindow(QMainWindow):
         self.btn_ref = QPushButton("Compute AA distributions")
         self.btn_ref.clicked.connect(self.compute_reference)
         self.btn_run = QPushButton("Run fit")
-        self.btn_run.setStyleSheet("font-weight: bold")
+        self.btn_run.setObjectName("runButton")
         self.btn_run.clicked.connect(self.run_fit)
         self.btn_stop = QPushButton("Stop")
+        self.btn_stop.setObjectName("stopButton")
         self.btn_stop.clicked.connect(self.stop)
         self.btn_stop.setEnabled(False)
-        L.addWidget(_hline(self.btn_ref, self.btn_run, self.btn_stop))
+        L.addWidget(self.btn_ref)
+        L.addWidget(_hline(self.btn_run, self.btn_stop))
         self.progress = QProgressBar()
         self.progress.setTextVisible(True)
         L.addWidget(self.progress)
@@ -581,10 +590,22 @@ class MainWindow(QMainWindow):
 
         self.wheel = NoWheelFilter(self)
         block_wheel(left, self.wheel)
+        for cb in left.findChildren(QComboBox):     # long item texts must not widen the panel
+            cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(6)
+        for fl in left.findChildren(QFormLayout):     # labels go above their fields when narrow
+            fl.setRowWrapPolicy(QFormLayout.WrapLongRows)
         sa = QScrollArea()
         sa.setWidgetResizable(True)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         sa.setWidget(left)
-        sa.setMinimumWidth(200)
+        # never narrower than the content (folded sections included): the browse buttons
+        # at the right end of the rows stay visible however far the panel is dragged
+        m = L.contentsMargins()
+        need = max([left.minimumSizeHint().width()] +
+                   [g.content.minimumSizeHint().width() + m.left() + m.right()
+                    for g in left.findChildren(CollapsibleGroup)])
+        sa.setMinimumWidth(need + sa.verticalScrollBar().sizeHint().width() + 2 * sa.frameWidth())
         dl = QDockWidget("Setup", self)
         dl.setObjectName("setup")
         dl.setWidget(sa)
@@ -1503,9 +1524,13 @@ class MainWindow(QMainWindow):
             self.error("Mapping", "\n".join(msgs))
             return
         try:
-            p.run.exe()
+            exe = p.run.exe()
         except FileNotFoundError as exc:
             self.error("LAMMPS", str(exc))
+            return
+        missing = missing_packages(exe, p.cg.style)
+        if missing:
+            self.error("LAMMPS", package_hint(exe, p.cg.style, missing))
             return
         out = Path(p.out_dir)
         if (out / "runs").exists() and any((out / "runs").iterdir()):

@@ -19,7 +19,7 @@ from .mapping import FrameSelection, MappedTrajectory, map_frames, map_lammps_du
 from .model import CGModel
 from .optimize import EvalResult, OptimizerSettings, Tracker, clamp, run_ibi, run_pso
 from .params import BondedParams, ibi_update, initial_guess
-from .runner import Cancelled, LammpsPool, RunSettings
+from .runner import Cancelled, LammpsPool, RunSettings, missing_packages, package_hint
 from .topology import AATopology, WholeMaker, from_lammps_data
 from .units import DPDUnits
 
@@ -212,8 +212,9 @@ class Evaluator:
     """Runs one CG simulation per parameter set and scores it against the AA reference."""
 
     def __init__(self, out_dir: Path, built: BuiltSystem, model: CGModel, project: Project,
-                 ref: dict[str, Dist], pool: LammpsPool, log=print):
+                 ref: dict[str, Dist], pool: LammpsPool, log=print, on_done=None):
         self.out = Path(out_dir)
+        self.on_done = on_done          # called after every finished simulation
         self.runs = self.out / "runs"
         self.runs.mkdir(parents=True, exist_ok=True)
         self.built = built
@@ -247,9 +248,20 @@ class Evaluator:
                 idx = self.counter
             jobs.append((i, idx, p, key))
 
+        finished = [0]
+
         def run(job):
             i, idx, p, key = job
-            return i, key, self._run(idx, p, stage)
+            res = self._run(idx, p, stage)
+            with self.lock:
+                finished[0] += 1
+                k = finished[0]
+            if len(jobs) > 1:
+                self.log(f"    e{idx:04d} done ({k}/{len(jobs)} of {stage}): "
+                         + (f"score {res.score:.4f}" if res.ok else "FAILED"))
+            if self.on_done:
+                self.on_done(res)
+            return i, key, res
 
         for i, key, res in self.pool.map(run, jobs):
             self.cache[key] = res
@@ -345,6 +357,13 @@ class FitJob:
             raise ValueError("mapping is not valid: " + "; ".join(msgs))
         for m in msgs:
             self.log("warning: " + m)
+        exe = p.run.exe()
+        missing = missing_packages(exe, p.cg.style)
+        if missing:
+            raise RuntimeError(package_hint(exe, p.cg.style, missing))
+        if p.cg.style == "mdpd" and (p.run.threads > 1 or "omp" in p.run.extra_args):
+            self.log("warning: the mDPD pair styles have no OpenMP version, so threads barely speed "
+                     "up a run; use more simultaneous runs with 1 thread each instead")
         if self.mapped is None:
             self.log(f"Mapping the all-atom trajectory of {sp.name} ({sp.count} molecules) ...")
             self.mapped = map_aa(p, self.topo, lambda i, n: self.progress("mapping", i, n or 0),
@@ -378,7 +397,7 @@ class FitJob:
             self.log("warning: " + w)
 
         tracker = Tracker(on_result=self._on_result, on_best=self._on_best(out, ref, built))
-        ev = Evaluator(out, built, p.model, p, ref, self.pool, self.log)
+        ev = Evaluator(out, built, p.model, p, ref, self.pool, self.log, self._sim_done)
         evaluate = lambda plist, stage: ev(plist, stage)  # noqa: E731
         st = p.optimizer
         best = p0
@@ -391,6 +410,7 @@ class FitJob:
             if st.method in ("pso", "ibi+pso"):
                 if st.method == "pso":
                     tracker.add(evaluate([p0], "initial"))
+                self._check_first_run(tracker)
                 best = run_pso(best, evaluate, st, tracker, p.run.n_jobs, self.log, self.should_stop,
                                on_cycle=lambda c, n, k: self._expect(k))
         except Cancelled:
@@ -401,13 +421,23 @@ class FitJob:
             self.log(f"Results in {out / 'bestfit'}")
         return FitResult(tracker.best, p0, out, ev.counter)
 
+    def _check_first_run(self, tracker: Tracker) -> None:
+        """A failing initial simulation (missing LAMMPS style, unstable system) fails every
+        particle of the swarm as well: stop with its error instead of running the swarm."""
+        if tracker.best is None and tracker.history and not self._stop:
+            raise RuntimeError("the simulation with the initial parameters failed, so the swarm "
+                               "was not started:\n" + tracker.history[-1].message)
+
     # ---------------------------------------------------------- callbacks
     def _expect(self, n: int) -> None:
         self.n_expected += n
+        self.progress("fit", self.n_done, max(self.n_expected, self.n_done))
 
-    def _on_result(self, r: EvalResult) -> None:
+    def _sim_done(self, r: EvalResult) -> None:
         self.n_done += 1
         self.progress("fit", self.n_done, max(self.n_expected, self.n_done))
+
+    def _on_result(self, r: EvalResult) -> None:
         if self.on_result:
             self.on_result(r)
 

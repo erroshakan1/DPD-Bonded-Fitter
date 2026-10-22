@@ -28,6 +28,43 @@ def find_lammps() -> str | None:
     return None
 
 
+# LAMMPS packages each CG style needs (see cgbuild.STYLES)
+REQUIRED_PACKAGES = {"dpd": ("MOLECULE", "DPD-BASIC"),
+                     "dpd_q": ("MOLECULE", "DPD-BASIC", "KSPACE"),
+                     "mdpd": ("MOLECULE", "DPD-MESO")}
+_PACKAGES: dict[str, set[str] | None] = {}
+
+
+def lammps_packages(exe: str) -> set[str] | None:
+    """Packages compiled into ``exe`` (from ``lmp -h``); None if they cannot be read."""
+    if exe not in _PACKAGES:
+        try:
+            out = subprocess.run([exe, "-h"], capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        pk = None
+        if "Installed packages:" in out:
+            block = out.split("Installed packages:", 1)[1].split("List of", 1)[0]
+            pk = set(block.split())
+        _PACKAGES[exe] = pk
+    return _PACKAGES[exe]
+
+
+def missing_packages(exe: str, style: str) -> list[str]:
+    """Packages that ``style`` needs and ``exe`` lacks (empty when unknown or complete)."""
+    pk = lammps_packages(exe)
+    if pk is None:
+        return []
+    return [p for p in REQUIRED_PACKAGES.get(style, ()) if p not in pk]
+
+
+def package_hint(exe: str, style: str, missing: list[str]) -> str:
+    flags = " ".join(f"-D PKG_{p}=on" for p in missing)
+    return (f"{exe} lacks the LAMMPS package(s) {', '.join(missing)} needed for the '{style}' "
+            f"model. Rebuild LAMMPS with them (CMake: cmake {flags} . && make install) or choose "
+            "another LAMMPS executable or CG style.")
+
+
 def kill_process_tree(proc: subprocess.Popen, grace: float = 3.0) -> None:
     """Terminate a process started in its own session, including children (mpirun ranks)."""
     if proc.poll() is not None:

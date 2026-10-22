@@ -69,7 +69,9 @@ LAMMPS energies have no factor 1/2: `E = K (r − r0)²`, so the Gaussian estima
 * **LAMMPS**, used for the CG simulations whatever program made the all-atom run. It
   needs the `MOLECULE` and `DPD-BASIC` packages, plus `KSPACE` for charged DPD and
   `DPD-MESO` for mDPD. It is looked up on `PATH` as `lmp`, `lmp_serial`, `lmp_mpi`, … ;
-  choose another executable in the GUI or set `LAMMPS_EXE`.
+  choose another executable in the GUI or set `LAMMPS_EXE`. A fit checks the packages
+  (`lmp -h`) before it starts; to add one, rebuild with e.g.
+  `cmake -D PKG_DPD-MESO=on . && make install` in your LAMMPS build folder.
 * **Your all-atom simulation**, one of:
   * **LAMMPS**:
     * a data file (any atom style with molecule IDs, e.g. `full`, with `Masses` and

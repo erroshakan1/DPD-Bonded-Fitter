@@ -56,7 +56,9 @@ class CollapsibleGroup(QWidget):
         else:
             self.arrow.setText(title)
             self.arrow.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        head.addStretch(1)
+            self.arrow.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        if self.check is not None:
+            head.addStretch(1)
         self.content = QFrame()
         self.content.setObjectName("sectionContent")
         self.content.setFrameShape(QFrame.StyledPanel)

@@ -15,6 +15,8 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv)
     app.setApplicationName("cgdpd-fit")
     app.setStyle("Fusion")
+    from . import theme
+    theme.apply(app)
     from pathlib import Path
     from PySide6.QtGui import QIcon
     # Wayland desktops take the taskbar icon from the matching cgdpd-fit.desktop entry

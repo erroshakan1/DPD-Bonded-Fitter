@@ -210,3 +210,14 @@ def test_ibi_stops_automatically_when_the_score_levels_off():
     run_ibi(BondedParams({"b": (10.0, 1.0)}), evaluate, lambda p, d: p, st, Tracker(), log=lambda *_: None)
     assert len(calls) == st.ibi_iterations + 1
     assert OptimizerSettings.from_dict(st.to_dict()).tolerance == st.tolerance
+
+
+def test_missing_packages(tmp_path):
+    import os
+    from cgdpd_fit.core.runner import missing_packages
+    exe = tmp_path / "lmp"
+    exe.write_text("#!/bin/sh\necho 'Installed packages:'\necho ''\necho 'DPD-BASIC KSPACE MOLECULE'\n"
+                   "echo ''\necho 'List of individual style options'\n")
+    os.chmod(exe, 0o755)
+    assert missing_packages(str(exe), "dpd") == []
+    assert missing_packages(str(exe), "mdpd") == ["DPD-MESO"]
