@@ -114,6 +114,7 @@ class EvalResult:
     message: str = ""
     stage: str = ""
     dists: dict | None = None        # CG distributions (thinned), for plots
+    series: object = None            # TimeSeries of Rg and SASA of the CG run
 
 
 class Tracker:

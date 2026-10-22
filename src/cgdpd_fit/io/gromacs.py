@@ -64,9 +64,9 @@ def count_frames(tpr: str, traj: str) -> int:
 
 def iter_frames(tpr: str, traj: str, rows: np.ndarray, start: int = 0, stop: int | None = None,
                 stride: int = 1):
-    """Yield (box, positions (n_mol, n_atoms, 3), step) for the atom ``rows``."""
+    """Yield (box, positions (n_mol, n_atoms, 3), frame index, time in ps) for the atom ``rows``."""
     u = _universe(tpr, traj)
     shape = rows.shape
     flat = rows.ravel()
     for ts in u.trajectory[start:stop:max(1, stride)]:
-        yield _box(ts.dimensions), u.atoms.positions[flat].reshape(shape + (3,)).astype(float), ts.frame
+        yield _box(ts.dimensions), u.atoms.positions[flat].reshape(shape + (3,)).astype(float), ts.frame, float(ts.time)

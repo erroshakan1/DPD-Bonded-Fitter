@@ -18,6 +18,7 @@ class MappedTrajectory:
     steps: list[int] = field(default_factory=list)
     volumes: list[float] = field(default_factory=list)
     lengths: list[np.ndarray] = field(default_factory=list)     # box edge lengths per frame (A)
+    times: list[float] = field(default_factory=list)            # ps, if the trajectory has times
 
     @property
     def n_frames(self) -> int:
@@ -55,23 +56,25 @@ def species_rows(sp: Species, max_molecules: int = 0, seed: int = 0) -> np.ndarr
 
 def map_frames(frames, topo: AATopology, sp: Species, model: CGModel, rows: np.ndarray,
                progress=None, should_stop=None, n_total: int | None = None) -> MappedTrajectory:
-    """Map an iterable of (box, positions (n_mol, n_atoms, 3), step) tuples."""
+    """Map an iterable of (box, positions (n_mol, n_atoms, 3), step[, time in ps]) tuples."""
     W = model.weights(sp, topo.masses[rows[0]])
     whole = WholeMaker.for_species(sp)
-    xs, steps, vols, lens = [], [], [], []
-    for k, (box, pos, step) in enumerate(frames):
+    xs, steps, vols, lens, times = [], [], [], [], []
+    for k, (box, pos, step, *t) in enumerate(frames):
         if should_stop and should_stop():
             raise Cancelled()
         x = whole.apply(pos, box)
         xs.append(np.einsum("ba,mak->mbk", W, x).astype(np.float32))
         steps.append(int(step))
+        if t:
+            times.append(float(t[0]))
         vols.append(float(abs(np.linalg.det(box.h_matrix()))))
         lens.append(np.array(box.lengths, dtype=float))
         if progress:
             progress(k + 1, n_total)
     if not xs:
         raise ValueError("no frames selected")
-    return MappedTrajectory(np.stack(xs), steps, vols, lens)
+    return MappedTrajectory(np.stack(xs), steps, vols, lens, times if len(times) == len(xs) else [])
 
 
 def map_lammps_dump(path: str, topo: AATopology, sp: Species, model: CGModel,

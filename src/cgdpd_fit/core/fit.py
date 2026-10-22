@@ -19,6 +19,7 @@ from .mapping import FrameSelection, MappedTrajectory, map_frames, map_lammps_du
 from .model import CGModel
 from .optimize import EvalResult, OptimizerSettings, Tracker, clamp, run_ibi, run_pso
 from .params import BondedParams, ibi_update, initial_guess
+from .timeseries import TimeSeries, bead_radius, time_series
 from .runner import Cancelled, LammpsPool, RunSettings, missing_packages, package_hint
 from .topology import AATopology, WholeMaker, from_lammps_data
 from .units import DPDUnits
@@ -36,6 +37,7 @@ class AAInput:
     split: str = "auto"
     tpr: str = ""                    # GROMACS
     traj: str = ""
+    timestep_fs: float = 1.0         # LAMMPS dumps carry steps only; time = step * timestep
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -156,13 +158,20 @@ def map_aa(project: Project, topo: AATopology, progress=None, should_stop=None) 
     return map_lammps_dump(project.aa.dump, topo, sp, project.model, sel, progress, should_stop, n_total)
 
 
+def aa_time_series(project: Project, mt: MappedTrajectory) -> TimeSeries:
+    """Rg and SASA of the mapped all-atom trajectory against time (ps)."""
+    t = (np.array(mt.times) if mt.times
+         else np.array(mt.steps, float) * project.aa.timestep_fs / 1000.0)
+    return time_series(mt.x, t - t[0], bead_radius(project.units.rc, project.cg.density))
+
+
 def _species_frames(aa: AAInput, topo: AATopology, sp, start=0, stop=None, stride=1):
     """(frame index, whole coordinates (n_mol, n_atoms, 3)) of all molecules of ``sp``."""
     rows = sp.rows()
     whole = WholeMaker.for_species(sp)
     if aa.format == "gromacs":
         from ..io.gromacs import iter_frames
-        frames = ((box, pos) for box, pos, _step in iter_frames(aa.tpr, aa.traj, rows, start, stop, stride))
+        frames = ((box, pos) for box, pos, *_ in iter_frames(aa.tpr, aa.traj, rows, start, stop, stride))
     else:
         ids = topo.ids[rows.ravel()]
         frames = ((fr.box, fr.pos.reshape(rows.shape + (3,)))
@@ -232,7 +241,8 @@ class Evaluator:
                                    bool(model.angles), project.angle_style, system_dir="../../system/")
 
     def _key(self, p: BondedParams) -> tuple:
-        return tuple(float(f"{p.get(k):.6g}") for k in p.keys())
+        return (tuple(float(f"{p.get(k):.6g}") for k in p.keys())
+                + tuple(np.round(u, 5).tobytes() for _g, u in sorted(p.tables.items())))
 
     def __call__(self, plist: list[BondedParams], stage: str = "") -> list[EvalResult]:
         jobs = []
@@ -241,7 +251,7 @@ class Evaluator:
             key = self._key(p)
             if key in self.cache:
                 c = self.cache[key]
-                out[i] = EvalResult(c.index, p, c.score, c.terms, c.ok, c.message, stage, c.dists)
+                out[i] = EvalResult(c.index, p, c.score, c.terms, c.ok, c.message, stage, c.dists, c.series)
                 continue
             with self.lock:
                 self.counter += 1
@@ -279,7 +289,7 @@ class Evaluator:
         if rc != 0 or not traj.exists():
             return EvalResult(idx, p, float("inf"), {}, False, f"LAMMPS exit {rc}: {tail}", stage)
         try:
-            cg = self.analyse(traj)
+            cg, series = self.analyse(traj)
         except Exception as exc:  # noqa: BLE001
             return EvalResult(idx, p, float("inf"), {}, False, f"analysis failed: {exc}", stage)
         total, terms = score(self.ref, cg, self.project.scoring)
@@ -290,18 +300,21 @@ class Evaluator:
             {"index": idx, "stage": stage, "score": total, "terms": terms, "params": p.to_dict(),
              "seconds": round(time.time() - t0, 1)}, indent=1))
         thin = {k: d.thin(MAX_STORED_SAMPLES, idx) for k, d in cg.items()}
-        return EvalResult(idx, p, total, terms, True, "", stage, thin)
+        return EvalResult(idx, p, total, terms, True, "", stage, thin, series)
 
-    def analyse(self, traj: Path) -> dict[str, Dist]:
+    def analyse(self, traj: Path) -> tuple[dict[str, Dist], TimeSeries]:
         ids = self.built.solute_ids
-        xs = []
+        xs, steps = [], []
         for fr in iter_dump(traj, ids=ids.ravel()):
             x = fr.pos.reshape(ids.shape + (3,))
             xs.append(self.whole.apply(x, fr.box))
+            steps.append(fr.step)
         if len(xs) < 2:
             raise ValueError("too few frames in the CG trajectory")
         x = self.project.units.to_angstrom(np.stack(xs[1:]))      # drop the first (pre-run) frame
-        return compute_distributions(x, self.model)
+        t = (np.array(steps[1:], float) - steps[1]) * self.project.cg.dt
+        series = time_series(x, t, bead_radius(self.project.units.rc, self.project.cg.density), "τ")
+        return compute_distributions(x, self.model), series
 
 
 # ======================================================================= workflow
@@ -317,12 +330,12 @@ class FitJob:
     """Runs the whole fit; callbacks let a GUI follow it.
 
     ``log(str)``, ``progress(stage, i, n)``, ``on_ref(ref)``, ``on_result(EvalResult)``,
-    ``on_best(EvalResult)``.
+    ``on_best(EvalResult)``, ``on_series(TimeSeries)`` (all-atom Rg and SASA against time).
     """
 
     def __init__(self, project: Project, topo: AATopology | None = None,
                  mapped: MappedTrajectory | None = None, log=print, progress=None,
-                 on_ref=None, on_result=None, on_best=None):
+                 on_ref=None, on_result=None, on_best=None, on_series=None):
         self.p = project
         self.topo = topo
         self.mapped = mapped
@@ -331,6 +344,8 @@ class FitJob:
         self.on_ref = on_ref
         self.on_result = on_result
         self.on_best = on_best
+        self.on_series = on_series
+        self.aa_series: TimeSeries | None = None
         self.pool = LammpsPool(project.run)
         self._stop = False
         self.n_done = 0
@@ -374,6 +389,10 @@ class FitJob:
         np.savez_compressed(out / "aa_reference.npz", **{k: d.samples for k, d in ref.items()})
         if self.on_ref:
             self.on_ref(ref)
+        self.aa_series = aa_time_series(p, mt)
+        self.aa_series.to_csv(out / "aa_timeseries.csv")
+        if self.on_series:
+            self.on_series(self.aa_series)
         self.log("All-atom reference (mean +- sd):")
         for k, d in ref.items():
             unit = "deg" if d.kind == "angle" else "A"
@@ -386,6 +405,9 @@ class FitJob:
             self.log(f"  bond  {g:20s} K = {K:9.3f}  r0 = {r0:.4f}")
         for g, (K, th) in p0.angles.items():
             self.log(f"  angle {g:20s} K = {K:9.3f}  theta0 = {th:.2f}")
+        for g in p0.tables:
+            self.log(f"  angle {g:20s} tabulated (Boltzmann inversion), refined by IBI; "
+                     "the swarm fits the bonds only")
 
         sysdir = out / "system"
         lengths = mt.lengths[p.cg.frame] if mt.lengths else self.topo.box.lengths
@@ -407,6 +429,9 @@ class FitJob:
                 self.n_expected += st.ibi_iterations + 1
                 upd = lambda q, cg: ibi_update(q, ref, cg, p.units, st.ibi_alpha)  # noqa: E731
                 best = run_ibi(p0, evaluate, upd, st, tracker, self.log, self.should_stop)
+            elif p0.tables:
+                self.log("warning: tabulated angles are refined by IBI only; with method 'pso' "
+                         "they stay at the Boltzmann inversion")
             if st.method in ("pso", "ibi+pso"):
                 if st.method == "pso":
                     tracker.add(evaluate([p0], "initial"))
@@ -468,11 +493,16 @@ class FitJob:
             "reference": {k: {"mean": v.mean, "std": v.std} for k, v in ref.items()},
             "cg": {k: {"mean": v.mean, "std": v.std} for k, v in (r.dists or {}).items()},
         }, indent=1))
+        if r.series is not None:
+            r.series.to_csv(d / "cg_timeseries.csv")
         try:
-            from ..plots import plot_distributions
+            from ..plots import plot_distributions, plot_timeseries
             plot_distributions(ref, r.dists or {}, d / "distributions.png",
                                title=f"best fit: score {r.score:.4f} (e{r.index:04d})",
                                bond_bin=self.p.bond_bin, angle_bin=self.p.angle_bin)
+            if self.aa_series is not None:
+                plot_timeseries(self.aa_series, r.series, d / "timeseries.png",
+                                title=f"best fit (e{r.index:04d})")
         except Exception as exc:  # noqa: BLE001 - plotting is optional
             self.log(f"plot warning: {exc}")
 

@@ -1,4 +1,4 @@
-"""Matplotlib figures: AA vs CG distributions and the score history."""
+"""Matplotlib figures: AA vs CG distributions, Rg/SASA time series and the score history."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -95,4 +95,47 @@ def plot_history(history, path: str | Path) -> None:
     from matplotlib.figure import Figure
     fig = Figure(figsize=(6, 3.5))
     draw_history(fig, history)
+    fig.savefig(path, dpi=130)
+
+
+def draw_timeseries(fig, aa, cg=None, title: str = "") -> None:
+    """Rg and SASA against time, all-atom (bottom axis, ns or ps) and CG (top axis, tau).
+
+    The DPD time unit has no fixed value in ps, so each curve keeps its own time axis and
+    both axes span the full width of the panel."""
+    fig.clear()
+    if aa is None:
+        return
+    axes = fig.subplots(1, 2)
+    ns = len(aa.time) and aa.time[-1] > 2000
+    ta = aa.time / 1000.0 if ns else aa.time
+    for ax, key, label in zip(axes, ("rg", "sasa"), ("Rg (Å)", "SASA (nm²)")):
+        la, = ax.plot(ta, getattr(aa, key), color=AA_COLOR, lw=0.8, label="AA-mapped")
+        lines = [la]
+        ax.set_xlabel(f"AA time ({'ns' if ns else 'ps'})", fontsize=8, color=AA_COLOR)
+        if len(ta) > 1:
+            ax.set_xlim(ta[0], ta[-1])
+        if cg is not None and len(cg.time):
+            top = ax.twiny()
+            lc, = top.plot(cg.time, getattr(cg, key), color=CG_COLOR, lw=0.8, label="CG")
+            lines.append(lc)
+            if len(cg.time) > 1:
+                top.set_xlim(cg.time[0], cg.time[-1])
+            top.set_xlabel(f"CG time ({cg.unit})", fontsize=8, color=CG_COLOR)
+            top.tick_params(labelsize=7, colors=CG_COLOR)
+        ax.set_ylabel(label, fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.tick_params(axis="x", colors=AA_COLOR)
+        ax.legend(lines, [ln.get_label() for ln in lines], fontsize=7, frameon=False, loc="upper right")
+        ax.set_title({"rg": "Radius of gyration", "sasa": "Solvent accessible surface"}[key],
+                     fontsize=9, pad=22 if cg is not None else 6)
+    if title:
+        fig.suptitle(title, fontsize=10)
+    fig.tight_layout()
+
+
+def plot_timeseries(aa, cg, path: str | Path, title: str = "") -> None:
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(10, 4))
+    draw_timeseries(fig, aa, cg, title)
     fig.savefig(path, dpi=130)

@@ -221,3 +221,42 @@ def test_missing_packages(tmp_path):
     os.chmod(exe, 0o755)
     assert missing_packages(str(exe), "dpd") == []
     assert missing_packages(str(exe), "mdpd") == ["DPD-MESO"]
+
+
+def test_tabulated_angles_reproduce_a_two_peaked_distribution(tmp_path):
+    from cgdpd_fit.core.cgbuild import input_script, write_params
+    from cgdpd_fit.core.params import (TABLE_GRID, angle_density, table_from_pmf, table_ibi_update)
+    rng = np.random.default_rng(0)
+    aa = np.concatenate([rng.normal(60, 6, 40000), rng.normal(100, 12, 40000)])
+    ref = {"angle:A-B-A": Dist("angle", "A-B-A", aa)}
+    p = initial_guess(ref, DPDUnits(), "table")
+    assert not p.angles and p.keys() == []                  # the swarm does not see the table
+    u = p.tables["A-B-A"]
+    w = np.exp(-u) * np.sin(np.radians(TABLE_GRID))         # Boltzmann sampling of U
+    assert np.allclose(w / w.sum(), angle_density(aa), atol=1e-4)
+    # a CG distribution too wide at 60 degrees deepens the well there
+    u2 = table_ibi_update(u, aa, rng.normal(80, 25, 80000))
+    assert u2[60] - u2[80] < u[60] - u[80]
+    model = CGModel(beads=[Bead("A", [0]), Bead("B", [1]), Bead("A", [2])], bonds=[(0, 1), (1, 2)],
+                    angles=[(0, 1, 2)])
+    model.bond_groups, model.angle_groups = ["A-B", "A-B"], ["A-B-A"]
+    p.bonds["A-B"] = (100.0, 0.8)
+    write_params(tmp_path / "params.lmp", p, model)
+    assert "angle_coeff 1 angles.table A1" in (tmp_path / "params.lmp").read_text()
+    lines = (tmp_path / "angles.table").read_text().splitlines()
+    assert lines[3] == "N 181" and lines[5].split()[:2] == ["1", "0.0"] and lines[-1].split()[1] == "180.0"
+    assert "angle_style     table spline 181" in input_script(CGSystemSettings(), DPDUnits(), 2, True, True, "table")
+
+
+def test_sasa_and_time_series():
+    from cgdpd_fit.core.timeseries import bead_radius, sasa, time_series
+    r, p = 3.0, 1.4
+    one = sasa(np.zeros((1, 1, 3)), r, p)[0]
+    assert abs(one - 4 * np.pi * (r + p) ** 2) < 1e-6 * one
+    far = sasa(np.array([[[0, 0, 0], [100, 0, 0]]], float), r, p)[0]
+    near = sasa(np.array([[[0, 0, 0], [4, 0, 0]]], float), r, p)[0]
+    assert abs(far - 2 * one) < 1e-6 * far and near < far
+    assert abs(4 / 3 * np.pi * bead_radius(6.46, 3.0) ** 3 - 6.46 ** 3 / 3) < 1e-6
+    x = np.random.default_rng(1).normal(size=(5, 3, 4, 3)) * 3
+    ts = time_series(x, np.arange(5) * 2.0, 2.0)
+    assert ts.rg.shape == ts.sasa.shape == (5,) and np.all(ts.sasa > 0)

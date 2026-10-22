@@ -13,7 +13,7 @@ Python package and command: `cgdpd-fit`.
 
 Takes an all-atom simulation from **LAMMPS** (data file + `lammpstrj`) or **GROMACS**
 (`tpr` + `xtc`/`trr`), maps it onto a coarse-grained model you draw in the GUI and fits the
-bonded parameters (harmonic bonds, harmonic or cosine/squared angles) of DPD, charged DPD
+bonded parameters (harmonic bonds; harmonic, cosine/squared or tabulated angles) of DPD, charged DPD
 or many-body DPD (mDPD) models with LAMMPS. Swarm-CG–style optimisation, written for DPD.
 
 ## Workflow
@@ -43,6 +43,11 @@ or many-body DPD (mDPD) models with LAMMPS. Swarm-CG–style optimisation, writt
      `K ← K·(σ²_CG/σ²_AA)^α`, `x0 ← x0 + α(⟨x⟩_AA − ⟨x⟩_CG)`.
    * Swarm-CG–style PSO cycles then refine them. Force constants are searched on a log
      scale, and every PSO step runs the whole swarm in parallel.
+   * Angle style *table*: for asymmetric or two-peaked angle distributions (e.g. the
+     tacticity of one-bead-per-monomer polystyrene), which no single well reproduces. The
+     angle potential is tabulated (`angles.table`, `angle_style table`): it starts from the
+     Boltzmann inversion `U = −kT ln(P(θ)/sin θ)` and is refined by iterative Boltzmann
+     inversion, `U ← U + α kT ln(P_CG/P_AA)`. The swarm then fits the bonds only.
    * Score: earth mover's distance of every group divided by the all-atom width (or the
      Swarm-CG–style absolute mix), combined as an RMS.
    * Effort presets *Quick*, *Standard* and *Thorough* set everything. As in Swarm-CG, each
@@ -52,15 +57,21 @@ or many-body DPD (mDPD) models with LAMMPS. Swarm-CG–style optimisation, writt
    * The radius of gyration of the molecule (beads) is shown next to the bond and angle
      distributions and written to the results; it is reported, and scored only on request.
 
+   * The *Time series* tab plots the radius of gyration and the solvent accessible surface
+     (Shrake–Rupley on the beads, each molecule alone, bead radius from `r_c³/ρ`, 1.4 Å
+     probe) against time, mean over the molecules: the mapped all-atom run on the bottom
+     axis (ps or ns; for LAMMPS dumps set the MD *Timestep*) and the best CG run on the top
+     axis (DPD time units τ).
+
 Output (`<out>/`): `bestfit/params.lmp`, a ready-to-run CG system (`system.data`,
-`pair.lmp`, `in.cg`), `distributions.png`, `history.csv`, `score_history.png`, and one
+`pair.lmp`, `in.cg`), `distributions.png`, `timeseries.png` with `cg_timeseries.csv` (and `aa_timeseries.csv`), `history.csv`, `score_history.png`, and one
 folder per simulation under `runs/`.
 
 ## Conventions
 
 LAMMPS energies have no factor 1/2: `E = K (r − r0)²`, so the Gaussian estimate is
 `K = kT / (2σ²)` with σ in DPD length units (bonds), radians (harmonic angles) or cosines
-(cosine/squared). Lengths in trajectories are Å (LAMMPS `real`/`metal`, or MDAnalysis).
+(cosine/squared). Tabulated angles are in kT. Lengths in trajectories are Å (LAMMPS `real`/`metal`, or MDAnalysis).
 
 ## What you need
 

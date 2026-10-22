@@ -21,15 +21,15 @@ from .. import __version__
 from ..core.cgbuild import STYLES, CGSystemSettings
 from ..core.distributions import ScoreSettings, compute_distributions
 from ..core.flory import bead_molar_volume
-from ..core.fit import (AAInput, FitJob, Project, count_frames, frame_conformation, load_topology, map_aa,
+from ..core.fit import (AAInput, FitJob, Project, aa_time_series, count_frames, frame_conformation, load_topology, map_aa,
                         most_extended_conformation)
 from ..core.mapping import FrameSelection, reference_beads
 from ..core.model import CENTER_LABELS, CENTERS, Bead, CGModel, auto_chain_model
 from ..core.optimize import CYCLE_WHAT, PRESET_HELP, CycleSpec, OptimizerSettings, preset
-from ..core.params import ANGLE_STYLES, initial_guess
+from ..core.params import ANGLE_STYLES, TABLE_GRID, initial_guess
 from ..core.runner import Cancelled, RunSettings, find_lammps, missing_packages, package_hint
 from ..core.units import DPDUnits, rc_from_mapping
-from ..plots import draw_distributions, draw_history
+from ..plots import draw_distributions, draw_history, draw_timeseries
 from .mol_view import MoleculeView
 from .pair_dialog import PairDialog
 from .widgets import CollapsibleGroup, NoWheelFilter, block_wheel
@@ -303,6 +303,21 @@ class MainWindow(QMainWindow):
         psplit.addWidget(self.canvas_hist)
         psplit.addWidget(self.tbl_params)
         self.tabs.addTab(psplit, "Fit progress")
+        # time series tab
+        self.fig_ts = Figure(figsize=(8, 4))
+        self.canvas_ts = FigureCanvasQTAgg(self.fig_ts)
+        wt = QWidget()
+        lt = QVBoxLayout(wt)
+        hint = QLabel("Radius of gyration and solvent accessible surface of the beads against time, "
+                      "mean over the molecules (SASA: Shrake-Rupley, each molecule alone, bead "
+                      "radius from r_c³/ρ, 1.4 Å probe). All-atom on the bottom axis, best CG run "
+                      "on the top axis (DPD time units).")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lt.addWidget(hint)
+        lt.addWidget(self.canvas_ts, 1)
+        self.tabs.addTab(wt, "Time series")
+        self.aa_series = None
         self.setCentralWidget(self.tabs)
 
         # ------------------------------------------------ left dock
@@ -327,6 +342,11 @@ class MainWindow(QMainWindow):
         self.cmb_split.addItems(["auto", "molid", "bonds"])
         self.row_style = _hline(self.cmb_style, QLabel("Molecules by"), self.cmb_split)
         f1.addRow("Atom style", self.row_style)
+        self.spn_aa_dt = _dspin(0.001, 100.0, 1.0, 3, 0.5, " fs")
+        self.spn_aa_dt.setToolTip("MD timestep of the all-atom run; the dump stores steps only,\n"
+                                  "so time = step × timestep (Rg and SASA time series)")
+        self.lbl_aa_dt = QLabel("Timestep")
+        f1.addRow(self.lbl_aa_dt, self.spn_aa_dt)
         self.btn_load = QPushButton("Load")
         self.btn_load.clicked.connect(self.load_aa)
         f1.addRow(self.btn_load)
@@ -417,6 +437,10 @@ class MainWindow(QMainWindow):
         f4.addRow("Style", self.cmb_cgstyle)
         self.cmb_angle_style = QComboBox()
         self.cmb_angle_style.addItems(list(ANGLE_STYLES))
+        self.cmb_angle_style.setToolTip(
+            "harmonic / cosine/squared: one well (K, theta0), fitted by moment matching + PSO.\n"
+            "table: tabulated U(theta) from Boltzmann inversion, refined by IBI; reproduces\n"
+            "asymmetric or two-peaked angle distributions. The swarm then fits the bonds only.")
         f4.addRow("Angle style", self.cmb_angle_style)
         self.cmb_box = QComboBox()
         self.cmb_box.addItems(["match the all-atom system", "custom box"])
@@ -745,6 +769,8 @@ class MainWindow(QMainWindow):
         self.lbl_data.setText("Data file" if lmp else "tpr")
         self.lbl_dump.setText("Trajectory" if lmp else "xtc / trr")
         self.row_style.setEnabled(lmp)
+        for w in (self.lbl_aa_dt, self.spn_aa_dt):
+            w.setVisible(lmp)
 
     def _update_style(self):
         st = self.cmb_cgstyle.currentData()
@@ -773,7 +799,8 @@ class MainWindow(QMainWindow):
     def aa_input(self) -> AAInput:
         if self.cmb_format.currentIndex() == 0:
             return AAInput("lammps", self.ed_data.text().strip(), self.ed_dump.text().strip(),
-                           self.cmb_style.currentText(), self.cmb_split.currentText())
+                           self.cmb_style.currentText(), self.cmb_split.currentText(),
+                           timestep_fs=self.spn_aa_dt.value())
         return AAInput("gromacs", tpr=self.ed_data.text().strip(), traj=self.ed_dump.text().strip())
 
     def load_aa(self, keep_models: bool = False):
@@ -1262,6 +1289,13 @@ class MainWindow(QMainWindow):
     def invalidate_reference(self, *_):
         self.mapped = None
         self.ref = None
+        self.aa_series = None
+
+    def show_timeseries(self):
+        cg = self.best.series if self.best is not None else None
+        title = f"best CG run e{self.best.index:04d}" if cg is not None else ""
+        draw_timeseries(self.fig_ts, self.aa_series, cg, title)
+        self.canvas_ts.draw_idle()
 
     def current_project(self) -> Project:
         p = Project()
@@ -1478,9 +1512,12 @@ class MainWindow(QMainWindow):
             w.log.emit(f"Mapping the trajectory of {self.species.name} ...")
             mt = map_aa(p, topo, lambda i, n: w.progress.emit("mapping", i, n or 0),
                         lambda: w.stop_requested)
-            return mt
+            w.log.emit("Rg and SASA time series ...")
+            return mt, aa_time_series(p, mt)
 
-        def done(mt):
+        def done(val):
+            mt, self.aa_series = val
+            self.show_timeseries()
             self.mapped = mt
             self.ref = compute_distributions(mt.x, p.model)
             self.log(f"  {mt.n_frames} frames x {mt.n_molecules} molecules")
@@ -1508,10 +1545,14 @@ class MainWindow(QMainWindow):
     def fill_params(self, params, terms):
         rows = [(f"bond {g}", K, x, terms.get(f"bond:{g}")) for g, (K, x) in params.bonds.items()]
         rows += [(f"angle {g}", K, x, terms.get(f"angle:{g}")) for g, (K, x) in params.angles.items()]
+        rows += [(f"angle {g}", "table", f"min {TABLE_GRID[int(np.argmin(u))]:.0f}°", terms.get(f"angle:{g}"))
+                 for g, u in params.tables.items()]
         t = self.tbl_params
         t.setRowCount(len(rows))
         for r, (name, K, x, s) in enumerate(rows):
-            for c, v in enumerate((name, f"{K:.4g}", f"{x:.4g}", "" if s is None else f"{s:.3f}")):
+            K = K if isinstance(K, str) else f"{K:.4g}"
+            x = x if isinstance(x, str) else f"{x:.4g}"
+            for c, v in enumerate((name, K, x, "" if s is None else f"{s:.3f}")):
                 t.setItem(r, c, QTableWidgetItem(v))
 
     # =================================================================== fit
@@ -1548,7 +1589,8 @@ class MainWindow(QMainWindow):
                          progress=lambda s, i, n: w.progress.emit(s, i, n),
                          on_ref=lambda ref: w.event.emit("ref", ref),
                          on_result=lambda r: w.event.emit("result", r),
-                         on_best=lambda r: w.event.emit("best", r))
+                         on_best=lambda r: w.event.emit("best", r),
+                         on_series=lambda s: w.event.emit("series", s))
             w.job = job
             if w.stop_requested:
                 job.stop()
@@ -1578,8 +1620,12 @@ class MainWindow(QMainWindow):
                 self.canvas_hist.draw_idle()
             if not obj.ok:
                 self.log(f"  simulation e{obj.index:04d} failed: {obj.message}")
+        elif kind == "series":
+            self.aa_series = obj
+            self.show_timeseries()
         elif kind == "best":
             self.best = obj
+            self.show_timeseries()
             self.fill_params(obj.params, obj.terms)
             self.show_reference()
             draw_history(self.fig_hist, self.history)
@@ -1679,6 +1725,7 @@ class MainWindow(QMainWindow):
         self.ed_dump.setText(p.aa.dump if p.aa.format == "lammps" else p.aa.traj)
         self.cmb_style.setCurrentText(p.aa.atom_style)
         self.cmb_split.setCurrentText(p.aa.split)
+        self.spn_aa_dt.setValue(p.aa.timestep_fs)
         self.spn_rc.setValue(p.units.rc)
         c = p.cg
         self.cg_extra = CGSystemSettings.from_dict(c.to_dict())

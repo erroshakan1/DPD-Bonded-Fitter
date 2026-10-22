@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from .model import CGModel
-from .params import BondedParams
+from .params import TABLE_GRID, BondedParams, table_text
 from .units import DPDUnits
 
 STYLES = {"dpd": "DPD (atom_style angle)", "dpd_q": "charged DPD (atom_style full)",
@@ -285,15 +285,26 @@ def build_system(workdir: str | Path, model: CGModel, bead_charges: np.ndarray,
                        type_names, q_total + n_ions * ion_q, warnings)
 
 
+ANGLE_TABLE_FILE = "angles.table"
+
+
 def write_params(path: Path, params: BondedParams, model: CGModel) -> None:
     lines = ["# bonded coefficients (LAMMPS convention, no factor 1/2): bonds K r0 [kT/rc^2, rc]",
              f"# angles ({params.angle_style}): K theta0 [kT, degrees]"]
     for k, g in enumerate(model.bond_group_names(), 1):
         K, r0 = params.bonds[g]
         lines.append(f"bond_coeff {k} {K:.6g} {r0:.6g}  # {g}")
-    for k, g in enumerate(model.angle_group_names(), 1):
-        K, th = params.angles[g]
-        lines.append(f"angle_coeff {k} {K:.6g} {th:.6g}  # {g}")
+    if params.angle_style == "table":
+        lines[1] = f"# angles (table): U(theta) in {ANGLE_TABLE_FILE} next to this file"
+        names = {g: f"A{k}" for k, g in enumerate(model.angle_group_names(), 1)}
+        for g, name in names.items():
+            lines.append(f"angle_coeff {name[1:]} {ANGLE_TABLE_FILE} {name}  # {g}")
+        (Path(path).parent / ANGLE_TABLE_FILE).write_text(
+            table_text({g: params.tables[g] for g in names}, names))
+    else:
+        for k, g in enumerate(model.angle_group_names(), 1):
+            K, th = params.angles[g]
+            lines.append(f"angle_coeff {k} {K:.6g} {th:.6g}  # {g}")
     Path(path).write_text("\n".join(lines) + "\n")
 
 
@@ -312,7 +323,8 @@ def input_script(st: CGSystemSettings, units: DPDUnits, n_solute_types: int, bon
     if bonds:
         L.append("bond_style      harmonic")
     if angles:
-        L.append(f"angle_style     {angle_style}")
+        L.append(f"angle_style     table spline {len(TABLE_GRID)}" if angle_style == "table"
+                 else f"angle_style     {angle_style}")
     if st.style == "dpd_q":
         L.append(f"special_bonds   lj {sl} coul {sl}")
     else:
