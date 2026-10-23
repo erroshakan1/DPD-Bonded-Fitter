@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cgdpd-fit"
-version = "0.4.0"
+version = "0.5.0"
 description = "Fit bonded DPD / mDPD parameters to all-atom LAMMPS or GROMACS simulations (Boltzmann inversion + Swarm-CG style PSO)"
 readme = "README.md"
 requires-python = ">=3.10"
